@@ -20,7 +20,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        pip install playwright pandas lxml
+        pip install playwright pandas lxml html5lib
         playwright install chromium
 
     - name: Run Scraper
