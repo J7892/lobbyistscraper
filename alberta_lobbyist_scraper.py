@@ -13,7 +13,8 @@ def fetch_registry_data():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080} # Set a desktop screen size for the screenshot
         )
         page = context.new_page()
         
@@ -21,12 +22,17 @@ def fetch_registry_data():
         page.goto(BASE_URL, wait_until="networkidle")
         
         print("Clicking into the 'Search Registry'...")
-        # By clicking the link like a real user, APEX generates a valid session ID for us
         page.locator("text=Search Registry").first.click()
         page.wait_for_load_state("networkidle")
         
         # APEX data tables can take a moment to render via AJAX, so we wait 3 seconds
         page.wait_for_timeout(3000)
+        
+        # --- NEW: DEBUGGING SCREENSHOTS ---
+        print("Taking debug screenshots...")
+        page.screenshot(path="debug_screenshot.png", full_page=True)
+        with open("debug_page.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
         
         html_content = page.content()
         browser.close()
@@ -99,12 +105,14 @@ def main():
     current_df = fetch_registry_data()
     if current_df is None or current_df.empty:
         print("Failed to extract data. The website structure may have changed.")
+        # --- NEW: Create an empty dummy file so the Git commit step doesn't crash ---
+        open(DATA_FILE, 'a').close()
         return
         
     print(f"Extracted {len(current_df)} current registry rows.")
     
-    # If a database file exists, compare current state to previous state
-    if os.path.exists(DATA_FILE):
+    # If a database file exists and is not completely empty, compare current state to previous state
+    if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
         print("Loading previous baseline for comparison...")
         previous_df = pd.read_csv(DATA_FILE)
         
