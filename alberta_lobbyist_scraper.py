@@ -2,11 +2,12 @@
 alberta_lobbyist_scraper.py
 """
 import os
+import io
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
 DATA_FILE = "alberta_lobbyists.csv"
-URL = "https://www.albertalobbyistregistry.ca/apex/f?p=171:9996:0::NO:::"
+BASE_URL = "https://albertalobbyistregistry.ca/"
 
 def fetch_registry_data():
     with sync_playwright() as p:
@@ -16,15 +17,23 @@ def fetch_registry_data():
         )
         page = context.new_page()
         
-        print(f"Navigating to {URL}...")
-        page.goto(URL, wait_until="networkidle")
+        print(f"Navigating to {BASE_URL}...")
+        page.goto(BASE_URL, wait_until="networkidle")
+        
+        print("Clicking into the 'Search Registry'...")
+        # By clicking the link like a real user, APEX generates a valid session ID for us
+        page.locator("text=Search Registry").first.click()
+        page.wait_for_load_state("networkidle")
+        
+        # APEX data tables can take a moment to render via AJAX, so we wait 3 seconds
+        page.wait_for_timeout(3000)
         
         html_content = page.content()
         browser.close()
         
         try:
-            # Pandas read_html automatically finds all <table> elements
-            tables = pd.read_html(html_content)
+            # Wrap the HTML string in io.StringIO to prevent Pandas from confusing it with a file path
+            tables = pd.read_html(io.StringIO(html_content))
         except ValueError:
             print("No tables found on the page.")
             return None
