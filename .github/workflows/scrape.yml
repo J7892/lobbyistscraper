@@ -1,0 +1,37 @@
+name: Alberta Lobbyist Scraper
+
+on:
+  schedule:
+    # Runs at 08:00 UTC (2:00 AM MST) every day
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Allows you to run it manually from the UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install playwright pandas lxml
+        playwright install chromium
+
+    - name: Run Scraper
+      run: python alberta_lobbyist_scraper.py
+
+    - name: Commit and Push changes
+      run: |
+        git config --global user.name "GitHub Action Scraper"
+        git config --global user.email "actions@github.com"
+        git add alberta_lobbyists.csv
+        # Only commit if changes exist to prevent empty workflow failures
+        git diff-index --quiet HEAD || git commit -m "Update registry baseline [skip ci]"
+        git push
