@@ -26,11 +26,20 @@ jobs:
     - name: Run Scraper
       run: python alberta_lobbyist_scraper.py
 
+    - name: Upload Debug Artifacts
+      uses: actions/upload-artifact@v4
+      if: always() # Ensures this runs even if the scraper step fails
+      with:
+        name: debug-files
+        path: |
+          debug_screenshot.png
+          debug_page.html
+
     - name: Commit and Push changes
       run: |
         git config --global user.name "GitHub Action Scraper"
         git config --global user.email "actions@github.com"
-        git add alberta_lobbyists.csv
+        git add alberta_lobbyists.csv || true
         # Only commit if changes exist to prevent empty workflow failures
         git diff-index --quiet HEAD || git commit -m "Update registry baseline [skip ci]"
         git push
