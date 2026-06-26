@@ -2,7 +2,6 @@
 alberta_lobbyist_scraper.py
 """
 import os
-import io
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -24,9 +23,10 @@ def fetch_registry_data(diagnostic_holder):
             
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
-            page.wait_for_load_state("networkidle")
             
-            # Use the deterministic button locator that successfully loaded the grid previously
+            print("Waiting for the Search Portal page context to appear...")
+            page.wait_for_selector("input#Search", timeout=25000)
+            
             print("Clicking the main 'Search' button element...")
             page.locator("input#Search").click()
             
@@ -43,39 +43,49 @@ def fetch_registry_data(diagnostic_holder):
             
         # Capture screen state for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
-        html_content = page.content()
+        
+        # --- FIX: Extract raw cell data directly via the browser DOM ---
+        print("Harvesting row text matrices straight from the browser context...")
+        matrix = page.evaluate("""() => {
+            // Target the main Oracle APEX data table container dynamically
+            const reportTable = document.querySelector('.a-IRR-table') || 
+                                document.querySelector('.apexir_WORKSHEET_DATA') ||
+                                Array.from(document.querySelectorAll('table')).find(t => {
+                                    const text = t.innerText || '';
+                                    return text.includes('Registration Number') && text.includes('Designated Filer');
+                                });
+                                
+            if (!reportTable) return null;
+            
+            const rows = Array.from(reportTable.querySelectorAll('tr'));
+            return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
+        }""")
+        
         browser.close()
         
-        try:
-            # Parse all tables out of the raw HTML layout
-            tables = pd.read_html(io.StringIO(html_content))
-            print(f"Pandas parsed {len(tables)} total tables from the page layout.")
-        except Exception as e:
-            diagnostic_holder["reason"] = f"Pandas failed to extract table frameworks: {str(e)}"
+        if not matrix or len(matrix) < 2:
+            diagnostic_holder["reason"] = "The browser successfully loaded the page, but the internal DOM query failed to locate the data grid layout container."
             return None
             
-        # --- FIX: Isolate the data grid strictly by shape metrics rather than text matching ---
-        valid_data_tables = []
-        for idx, df in enumerate(tables):
-            if df.empty:
-                continue
-            # Real data grids in this portal have at least 4 data columns and multiple entries
-            if df.shape[1] >= 4 and df.shape[0] >= 2:
-                valid_data_tables.append((idx, df))
-                
-        if not valid_data_tables:
-            # Fallback log tracking if structural signatures aren't met
-            meta_strings = [f"Table_{i}(cols={t.shape[1]}, rows={t.shape[0]})" for i, t in enumerate(tables)]
-            diagnostic_holder["reason"] = f"No tables matched size constraints. Detected layouts: {', '.join(meta_strings)}"
-            return None
-            
-        # Select the table containing the highest overall cell volume (Rows x Columns)
-        best_match = max(valid_data_tables, key=lambda item: item[1].shape[0] * item[1].shape[1])
-        print(f"Successfully isolated the target registry data grid at table index {best_match[0]}.")
-        data_table = best_match[1]
+        print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
         
-        # Format and clean header rows uniformly
-        data_table.columns = [str(col).strip().upper() for col in data_table.columns]
+        # Standardize and clean header rows uniformly from the first element
+        header_row = [str(cell).strip().upper() for cell in matrix[0]]
+        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
+        
+        cleaned_rows = []
+        for row in matrix[1:]:
+            if not any(row):  # Skip completely empty trailing lines
+                continue
+            if len(row) == len(header_row):
+                cleaned_rows.append(row)
+            elif len(row) > len(header_row):
+                cleaned_rows.append(row[:len(header_row)])
+            else:
+                cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
+                
+        # Build the DataFrame straight from our pristine text array matrix
+        data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
         # Drop non-analytical action links if they appear
         if 'VIEW' in data_table.columns:
