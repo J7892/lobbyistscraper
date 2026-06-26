@@ -56,7 +56,8 @@ def fetch_registry_data(diagnostic_holder):
             // Look for any table containing the key column header visible on screen
             let targetTable = tables.find(t => t.innerText && t.innerText.toLowerCase().includes('filing date'));
             
-            # Fallback: If text matching fails, grab the largest table by total row count
+            // FIX: Repaired comment token from '#' to '//' to eliminate JS execution crash
+            // Fallback: If text matching fails, grab the largest table by total row count
             if (!targetTable) {
                 targetTable = tables.reduce((max, t) => {
                     const rows = t.querySelectorAll('tr').length;
