@@ -1,2 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,Pandas failed to extract table frameworks: No tables found
+FAILED,"The browser successfully loaded the page, but the internal DOM query failed to locate the data grid layout container."
