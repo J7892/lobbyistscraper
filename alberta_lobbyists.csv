@@ -1,2 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"The query executed but no data table was found. Visible page text snippet:   OEC Alberta Lobbyist Registry Search Registry   Login Home ▼ For Lobbyists ▼ Registry Information ▼ Enforcement ▼ Resources ▼ Recent News Contact Us Welcome to the Alberta Lobbyist Registry To start the registration process for your organization, create a new lobbyist account. Please first review "
+FAILED,Pandas structural parsing exception: No tables found
