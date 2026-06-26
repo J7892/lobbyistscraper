@@ -4,6 +4,7 @@ alberta_lobbyist_scraper.py
 import os
 import io
 import pandas as pd
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 DATA_FILE = "alberta_lobbyists.csv"
@@ -25,38 +26,44 @@ def fetch_registry_data():
         page.locator("text=Search Registry").first.click()
         page.wait_for_load_state("networkidle")
         
-        # --- FIX: Target the specific input button ID to resolve the strict mode violation ---
         print("Clicking the specific 'Search' button element...")
         page.locator("input#Search").click()
         
-        # The page warns it can take up to 30 seconds; we will give it a solid 15 seconds to render
         print("Waiting 15 seconds for search results to generate...")
         page.wait_for_timeout(15000)
-        
-        # Take an updated screenshot so we can verify the table rendered
-        print("Taking updated debug screenshots...")
-        page.screenshot(path="debug_screenshot.png", full_page=True)
-        with open("debug_page.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
         
         html_content = page.content()
         browser.close()
         
+        # --- FIX: Use BeautifulSoup to isolate the exact data table ---
+        soup = BeautifulSoup(html_content, 'html.parser')
+        target_table = None
+        
+        for table in soup.find_all('table'):
+            table_text = table.text
+            if "Filing Date" in table_text and "Registration Number" in table_text:
+                target_table = table
+                break
+                
+        if target_table is None:
+            print("Failed to isolate the data table from the page structure.")
+            return None
+            
         try:
-            tables = pd.read_html(io.StringIO(html_content))
+            # Pass only the targeted table HTML snippet to Pandas
+            tables = pd.read_html(io.StringIO(str(target_table)))
+            data_table = tables[0]
         except ValueError:
-            print("No tables found on the page.")
+            print("Pandas failed to parse the isolated table snippet.")
             return None
-            
-        if not tables:
-            return None
-            
-        # Find the primary data table
-        data_table = max(tables, key=lambda t: len(t))
         
         # Clean up column names for consistency
         data_table.columns = [str(col).strip().upper() for col in data_table.columns]
         
+        # Drop completely empty columns or utility columns like 'VIEW' if they exist
+        if 'VIEW' in data_table.columns:
+            data_table = data_table.drop(columns=['VIEW'])
+            
         return data_table
 
 def identify_changes(old_df, new_df):
@@ -100,12 +107,12 @@ def main():
     
     current_df = fetch_registry_data()
     if current_df is None or current_df.empty:
-        print("Failed to extract data. The website structure may have changed.")
-        open(DATA_FILE, 'a').close()
+        print("Failed to extract data. Keeping existing file baseline.")
         return
         
     print(f"Extracted {len(current_df)} current registry rows.")
     
+    # Check if a valid baseline exists (file exists and is larger than 0 bytes)
     if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
         print("Loading previous baseline for comparison...")
         previous_df = pd.read_csv(DATA_FILE)
@@ -132,7 +139,7 @@ def main():
         print("\nNo previous data found. Establishing a new baseline...")
         
     current_df.to_csv(DATA_FILE, index=False)
-    print(f"\nState saved to {DATA_FILE}. Run this script again tomorrow to detect changes.")
+    print(f"\nState saved to {DATA_FILE}.")
 
 if __name__ == "__main__":
     main()
