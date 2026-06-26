@@ -1,2 +1,10 @@
-SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"The browser loaded the page, but the structural density query failed to harvest a valid multi-row data grid."
+FIELD_0,FIELD_1
+OEC,Alberta Lobbyist Registry
+OEC,Alberta Lobbyist Registry
+Alberta Lobbyist Registry,
+Filing an Initial Return,
+Changing a Registration,
+Terminating a Registration,
+Notices of Removal of Registration,
+Alberta Lobbyist Registry,
+Alberta Lobbyist Registry,
