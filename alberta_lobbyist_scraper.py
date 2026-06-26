@@ -145,7 +145,7 @@ def main():
         
         new_recs, removed_recs, changed_recs = identify_changes(previous_df, current_df)
         
-        print("\n=== POTENTIAL NEWS STORIES & ALERTS ===")
+        print("\n=== POTENTIAL NEWS & ALERTS ===")
         print(f"[*] NEW REGISTRATIONS: {len(new_recs)}")
         if not new_recs.empty:
             for _, row in new_recs.iterrows():
