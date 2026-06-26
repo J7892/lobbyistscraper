@@ -2,6 +2,7 @@
 alberta_lobbyist_scraper.py
 """
 import os
+import io
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -25,111 +26,64 @@ def fetch_registry_data(diagnostic_holder):
             page.locator("text=Search Registry").first.click()
             page.wait_for_load_state("networkidle")
             
-            print("Clicking the specific 'Search' button element...")
-            page.locator("input#Search").click()
+            # --- CRITICAL FIX: Target the actual visible button text layer ---
+            print("Locating the visible 'Search' action trigger...")
+            visible_search_btn = page.locator("span.ui-btn-text").filter(has_text="Search").first
+            visible_search_btn.wait_for(state="visible", timeout=25000)
             
-            print("Waiting 15 seconds for search results to generate...")
-            page.wait_for_timeout(15000)
+            print("Clicking the visible 'Search' button...")
+            visible_search_btn.click()
             
-            # Save a debug screenshot for tracking page layout states
-            page.screenshot(path="debug_screenshot.png", full_page=True)
+            # Wait for the actual data table headers to load on screen
+            print("Waiting for data table rows to render...")
+            page.wait_for_selector("text=Registration Number", timeout=30000)
+            print("Registry grid successfully initialized!")
             
-            print("Harvesting elements using an element-agnostic layout scanner...")
-            # This JavaScript handles BOTH traditional tables (tr) and mobile list views (li)
-            raw_matrix = page.evaluate("""() => {
-                let dataRecords = [];
-                
-                // Strategy A: Check for mobile list view items (li)
-                const listItems = Array.from(document.querySelectorAll('li'));
-                listItems.forEach(li => {
-                    let txt = li.innerText ? li.innerText.trim() : '';
-                    // Identify if the list item resembles a lobbyist registration block
-                    if (txt.includes('Registration') || txt.includes('Filing') || txt.includes('Status')) {
-                        // Split text lines into distinct pseudo-columns
-                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
-                        if (lines.length > 0) {
-                            dataRecords.push(lines);
-                        }
-                    }
-                });
-                
-                // Strategy B: If no list cards match, fall back to traditional table rows (tr)
-                if (dataRecords.length === 0) {
-                    const trElements = Array.from(document.querySelectorAll('tr'));
-                    trElements.forEach(tr => {
-                        const cells = Array.from(tr.querySelectorAll('th, td'));
-                        let cellsTxt = cells.map(c => c.innerText ? c.innerText.trim() : '');
-                        if (cellsTxt.some(t => t.length > 0)) {
-                            dataRecords.push(cellsTxt);
-                        }
-                    });
-                }
-                
-                return dataRecords;
-            }""")
+            # Small 3-second safety window to ensure AJAX data frames finish populating
+            page.wait_for_timeout(3000)
             
         except Exception as e:
-            msg = f"Browser automation harvesting module failed: {str(e)}"
+            msg = f"Browser execution failed to execute query: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
+            page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
+        page.screenshot(path="debug_screenshot.png", full_page=True)
+        html_content = page.content()
         browser.close()
         
-        if not raw_matrix:
-            diagnostic_holder["reason"] = "Scanned the page DOM but found zero matching table rows (tr) or mobile list blocks (li)."
+        try:
+            # Re-introduce pandas read_html to cleanly parse the validated grid markup
+            tables = pd.read_html(io.StringIO(html_content))
+            print(f"Pandas parsed {len(tables)} structural elements from layout content.")
+        except Exception as e:
+            diagnostic_holder["reason"] = f"Pandas failed to structurally parse layout: {str(e)}"
             return None
             
-        print(f"Successfully harvested {len(raw_matrix)} data record fragments from the layout.")
-        
-        # Determine the header definition row dynamically
-        header_row = None
-        data_start_idx = 0
-        
-        for idx, row in enumerate(raw_matrix):
-            row_upper = [str(cell).upper() for cell in row]
-            if any("REGISTRATION" in cell or "FILING" in cell or "STATUS" in cell for cell in row_upper):
-                header_row = [str(cell).upper() for cell in row]
-                data_start_idx = idx + 1
+        data_table = None
+        for idx, df in enumerate(tables):
+            if df.empty:
+                continue
+            cols_clean = [str(c).upper() for c in df.columns]
+            if any("REGISTRATION" in col or "FILING" in col for col in cols_clean):
+                print(f"Isolated genuine data matrix at index {idx}.")
+                data_table = df
+                data_table.columns = [str(c).strip().upper() for c in data_table.columns]
                 break
                 
-        # Fallback: If no dedicated header line is found, generate generic template names based on the longest row
-        if not header_row:
-            print("No structured header layout detected. Generating adaptive field layout...")
-            max_len = max(len(r) for r in raw_matrix)
-            header_row = [f"FIELD_{i}" for i in range(max_len)]
-            data_start_idx = 0
-            
-        # Clean any missing or empty column headers
-        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
-        
-        # Format every record array to match the unified header length
-        cleaned_rows = []
-        for row in raw_matrix[data_start_idx:]:
-            if len(row) == len(header_row):
-                cleaned_rows.append(row)
-            elif len(row) > len(header_row):
-                cleaned_rows.append(row[:len(header_row)])
-            else:
-                cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
-                
-        if not cleaned_rows:
-            diagnostic_holder["reason"] = "Isolated structural field categories but zero data objects were found matching the profile."
+        if data_table is None:
+            diagnostic_holder["reason"] = "Query submitted successfully, but column signature matching failed."
             return None
             
-        # Compile final structured dataset
-        data_table = pd.DataFrame(cleaned_rows, columns=header_row)
-        
-        # Drop navigation or utility columns if they populate
-        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
-        if cols_to_drop:
-            data_table = data_table.drop(columns=cols_to_drop)
+        if 'VIEW' in data_table.columns:
+            data_table = data_table.drop(columns=['VIEW'])
             
         return data_table
 
 def identify_changes(old_df, new_df):
-    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
+    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
     id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
     print(f"Tracking registry entries using identifier column: '{id_col}'")
@@ -173,7 +127,7 @@ def main():
         diagnostic_df.to_csv(DATA_FILE, index=False)
         return
         
-    print(f"Successfully processed {len(current_df)} rows from the layout fields.")
+    print(f"Successfully processed {len(current_df)} rows from the active data grid.")
     
     is_baseline_valid = False
     if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
