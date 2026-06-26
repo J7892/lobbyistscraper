@@ -25,30 +25,33 @@ def fetch_registry_data(diagnostic_holder):
             page.locator("text=Search Registry").first.click()
             page.wait_for_load_state("networkidle")
             
-            print("Clicking the specific 'Search' button element...")
-            page.locator("input#Search").click()
+            # --- FIX: Bypass the hidden button and trigger the form submission via JavaScript ---
+            print("Submitting the search query via the native APEX engine...")
+            page.evaluate("apex.submit('SEARCH')")
             
-            # --- FIX: Wait for the visual column text to appear instead of a class name ---
-            print("Waiting for visual registry column headers to render...")
-            page.wait_for_selector("text=Registration Number", timeout=45000)
-            print("Data grid text successfully detected on screen!")
+            print("Waiting for the network to become idle...")
+            page.wait_for_load_state("networkidle")
+            
+            # Give the database engine a comfortable 10 seconds to process and draw the rows
+            print("Allowing the data grid 10 seconds to completely render...")
+            page.wait_for_timeout(10000)
             
         except Exception as e:
-            msg = f"Browser automation navigation or click failed: {str(e)}"
+            msg = f"Browser automation navigation or form submission failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
             page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
-        # Take a success screenshot for artifact tracking
+        # Take a screenshot to capture the page state for verification
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        print("Extracting table rows via text matching...")
+        print("Extracting table rows from the live browser DOM...")
         matrix = page.evaluate("""() => {
             const tables = Array.from(document.querySelectorAll('table'));
-            // Find the table container that holds the visible registration data
-            const targetTable = tables.find(t => t.innerText && t.innerText.includes('Registration Number'));
+            // Look for any table that contains the core column headers
+            const targetTable = tables.find(t => t.innerText && (t.innerText.includes('Registration Number') || t.innerText.includes('Filing Date')));
             if (!targetTable) return null;
             
             const rows = Array.from(targetTable.querySelectorAll('tr'));
@@ -58,21 +61,24 @@ def fetch_registry_data(diagnostic_holder):
             });
         }""")
         
+        # Save a copy of the raw visible text on the page to aid diagnostics if extraction returns empty
+        page_text = page.locator("body").inner_text()
         browser.close()
         
         if not matrix or len(matrix) < 2:
-            diagnostic_holder["reason"] = "DOM extraction completed but the resulting text matrix was empty or structurally invalid."
+            snippet = page_text[:300].replace('\n', ' ') if page_text else "No visible text"
+            diagnostic_holder["reason"] = f"The query executed but no data table was found. Visible page text snippet: {snippet}"
             return None
             
         print(f"Browser successfully parsed a text matrix containing {len(matrix)} rows.")
         
-        # Standardize the headers based on the first extracted row containing valid column markers
+        # Isolate and sanitize headers
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
         header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
         
         cleaned_rows = []
         for row in matrix[1:]:
-            if not any(row):  # Skip completely empty lines
+            if not any(row):  # Skip empty lines
                 continue
             if len(row) == len(header_row):
                 cleaned_rows.append(row)
@@ -83,7 +89,7 @@ def fetch_registry_data(diagnostic_holder):
                 
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
-        # Drop common non-data columns if they populate
+        # Drop operational tracking columns if they appear
         cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
         if cols_to_drop:
             data_table = data_table.drop(columns=cols_to_drop)
@@ -128,11 +134,9 @@ def identify_changes(old_df, new_df):
 def main():
     print("Starting Alberta Lobbyist Registry Scraper...")
     
-    # Dictionary to pass error messages out of the browser routine if it fails
     diagnostic_holder = {"reason": "Unknown parsing exception encountered inside extraction loops."}
     current_df = fetch_registry_data(diagnostic_holder)
     
-    # If extraction fails, write the exact error message caught into the CSV file
     if current_df is None or current_df.empty:
         print("Scraper execution returned zero data records. Generating specific diagnostic tracking file.")
         diagnostic_df = pd.DataFrame([{
