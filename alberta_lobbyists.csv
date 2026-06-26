@@ -1,0 +1,2 @@
+SCRAPER_STATUS,DIAGNOSTIC_LOG
+FAILED,The script executed successfully but failed to isolate the internal APEX worksheet grid cells. Review the system artifacts to troubleshoot page states.
