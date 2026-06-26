@@ -1,5 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"Browser automation navigation or click failed: Page.wait_for_selector: Timeout 45000ms exceeded.
-Call log:
-  - waiting for locator(""text=Registration Number"") to be visible
-"
+FAILED,"The query executed but no data table was found. Visible page text snippet:   OEC Alberta Lobbyist Registry Search Registry   Login Home ▼ For Lobbyists ▼ Registry Information ▼ Enforcement ▼ Resources ▼ Recent News Contact Us Welcome to the Alberta Lobbyist Registry To start the registration process for your organization, create a new lobbyist account. Please first review "
