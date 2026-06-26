@@ -1,2 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,Pandas structural parsing exception: No tables found
+FAILED,Playwright successfully scanned the page elements but found zero table rows (tr).
