@@ -24,15 +24,17 @@ def fetch_registry_data(diagnostic_holder):
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
             
-            # Ensure the search portal page context and scripts are fully initialized
+            # Allow the mobile layout framework to fully initialize and bind button elements
             print("Waiting for network and scripts to become stable...")
             page.wait_for_load_state("networkidle")
             
-            search_button = page.locator("input#Search")
-            search_button.wait_for(state="visible", timeout=25000)
+            # --- CRITICAL FIX: Target the actual visible button wrapper text element ---
+            print("Locating the visible 'Search' button element layer...")
+            visible_search_btn = page.locator("span.ui-btn-text", has_text="Search").first
+            visible_search_btn.wait_for(state="visible", timeout=25000)
             
-            print("Clicking the main 'Search' button element...")
-            search_button.click()
+            print("Clicking the visible 'Search' button container...")
+            visible_search_btn.click()
             
             print("Waiting 15 seconds for the database engine to populate rows...")
             page.wait_for_timeout(15000)
@@ -51,24 +53,39 @@ def fetch_registry_data(diagnostic_holder):
         print("Harvesting row text matrices straight from the browser context...")
         matrix = page.evaluate("""() => {
             const tables = Array.from(document.querySelectorAll('table'));
-            if (tables.length === 0) return null;
             
-            // Look for any table containing the key column header visible on screen
-            let targetTable = tables.find(t => t.innerText && t.innerText.toLowerCase().includes('filing date'));
-            
-            // FIX: Repaired comment token from '#' to '//' to eliminate JS execution crash
-            // Fallback: If text matching fails, grab the largest table by total row count
-            if (!targetTable) {
-                targetTable = tables.reduce((max, t) => {
-                    const rows = t.querySelectorAll('tr').length;
-                    return rows > max.rows ? {table: t, rows: rows} : max;
-                }, {table: null, rows: 0}).table;
+            // Strategy 1: Check traditional tabular report layouts first
+            for (let table of tables) {
+                const trs = Array.from(table.querySelectorAll('tr'));
+                if (trs.length >= 2) {
+                    let tableRows = trs.map(tr => Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
+                    // Isolate the grid if it carries standard matching headers
+                    if (tableRows.some(row => row.some(cell => cell.toLowerCase().includes('filing') || cell.toLowerCase().includes('registration')))) {
+                        return tableRows;
+                    }
+                }
             }
             
-            if (!targetTable) return null;
+            // Strategy 2: Fallback to scanning custom division-based responsive list structures
+            const listItems = Array.from(document.querySelectorAll('li, div[class*="row"], div[class*="cell"]'));
+            let fallbackRows = [];
+            listItems.forEach(item => {
+                let txt = item.innerText ? item.innerText.trim() : '';
+                if (txt.includes('Registration Number') && (txt.includes('Filing Date') || txt.includes('Active'))) {
+                    let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                    if (lines.length > 0) fallbackRows.push(lines);
+                }
+            });
             
-            const rows = Array.from(targetTable.querySelectorAll('tr'));
-            return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
+            if (fallbackRows.length > 0) return fallbackRows;
+            
+            // Strategy 3: Final fallback to extract the largest table array on screen by line volume
+            if (tables.length > 0) {
+                let largestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.querySelectorAll('tr').length ? t : max, tables[0]);
+                return Array.from(largestTable.querySelectorAll('tr')).map(tr => Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
+            }
+            
+            return null;
         }""")
         
         browser.close()
@@ -79,7 +96,7 @@ def fetch_registry_data(diagnostic_holder):
             
         print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
         
-        # Standardize and clean header rows uniformly from the first element
+        # Standardize and clean header rows uniformly from the first element layout
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
         header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
         
@@ -97,9 +114,10 @@ def fetch_registry_data(diagnostic_holder):
         # Build the DataFrame straight from our pristine text array matrix
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
-        # Drop non-analytical action links if they appear
-        if 'VIEW' in data_table.columns:
-            data_table = data_table.drop(columns=['VIEW'])
+        # Drop non-analytical operational columns if they populate
+        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
+        if cols_to_drop:
+            data_table = data_table.drop(columns=cols_to_drop)
             
         return data_table
 
