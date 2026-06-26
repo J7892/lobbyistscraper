@@ -25,9 +25,9 @@ def fetch_registry_data():
         page.locator("text=Search Registry").first.click()
         page.wait_for_load_state("networkidle")
         
-        # --- FIX: Click the main gray Search bar inside the form ---
-        print("Clicking the secondary 'Search' bar to execute the query...")
-        page.locator("#wwvFlowForm").get_by_text("Search", exact=True).click()
+        # --- FIX: Target the specific input button ID to resolve the strict mode violation ---
+        print("Clicking the specific 'Search' button element...")
+        page.locator("input#Search").click()
         
         # The page warns it can take up to 30 seconds; we will give it a solid 15 seconds to render
         print("Waiting 15 seconds for search results to generate...")
