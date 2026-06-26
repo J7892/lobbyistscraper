@@ -14,22 +14,27 @@ def fetch_registry_data():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080} # Set a desktop screen size for the screenshot
+            viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
         
         print(f"Navigating to {BASE_URL}...")
         page.goto(BASE_URL, wait_until="networkidle")
         
-        print("Clicking into the 'Search Registry'...")
+        print("Clicking into the 'Search Registry' portal...")
         page.locator("text=Search Registry").first.click()
         page.wait_for_load_state("networkidle")
         
-        # APEX data tables can take a moment to render via AJAX, so we wait 3 seconds
-        page.wait_for_timeout(3000)
+        # --- FIX: Click the main gray Search bar inside the form ---
+        print("Clicking the secondary 'Search' bar to execute the query...")
+        page.locator("#wwvFlowForm").get_by_text("Search", exact=True).click()
         
-        # --- NEW: DEBUGGING SCREENSHOTS ---
-        print("Taking debug screenshots...")
+        # The page warns it can take up to 30 seconds; we will give it a solid 15 seconds to render
+        print("Waiting 15 seconds for search results to generate...")
+        page.wait_for_timeout(15000)
+        
+        # Take an updated screenshot so we can verify the table rendered
+        print("Taking updated debug screenshots...")
         page.screenshot(path="debug_screenshot.png", full_page=True)
         with open("debug_page.html", "w", encoding="utf-8") as f:
             f.write(page.content())
@@ -38,7 +43,6 @@ def fetch_registry_data():
         browser.close()
         
         try:
-            # Wrap the HTML string in io.StringIO to prevent Pandas from confusing it with a file path
             tables = pd.read_html(io.StringIO(html_content))
         except ValueError:
             print("No tables found on the page.")
@@ -47,7 +51,7 @@ def fetch_registry_data():
         if not tables:
             return None
             
-        # The primary registry data is reliably the largest table on the page
+        # Find the primary data table
         data_table = max(tables, key=lambda t: len(t))
         
         # Clean up column names for consistency
@@ -56,7 +60,6 @@ def fetch_registry_data():
         return data_table
 
 def identify_changes(old_df, new_df):
-    # Try to find an appropriate ID column to track entities across runs
     possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col]
     
     if not possible_id_cols:
@@ -67,25 +70,18 @@ def identify_changes(old_df, new_df):
         
     print(f"Tracking entities using the '{id_col}' column.")
     
-    # Cast to string to prevent mismatch errors between runs
     old_df[id_col] = old_df[id_col].astype(str)
     new_df[id_col] = new_df[id_col].astype(str)
     
-    # 1. New Registrations
     new_records = new_df[~new_df[id_col].isin(old_df[id_col])]
-    
-    # 2. Deregistrations / Removals
     removed_records = old_df[~old_df[id_col].isin(new_df[id_col])]
     
-    # 3. Changes in existing records (e.g., Status changed to "Terminated")
     common_ids = new_df[new_df[id_col].isin(old_df[id_col])][id_col]
-    
     old_common = old_df[old_df[id_col].isin(common_ids)].set_index(id_col).sort_index()
     new_common = new_df[new_df[id_col].isin(common_ids)].set_index(id_col).sort_index()
     
     changes = []
     for idx in common_ids:
-        # Fill NAs to avoid nan != nan evaluations triggering false positives
         old_row = old_common.loc[idx].fillna("")
         new_row = new_common.loc[idx].fillna("")
         
@@ -105,13 +101,11 @@ def main():
     current_df = fetch_registry_data()
     if current_df is None or current_df.empty:
         print("Failed to extract data. The website structure may have changed.")
-        # --- NEW: Create an empty dummy file so the Git commit step doesn't crash ---
         open(DATA_FILE, 'a').close()
         return
         
     print(f"Extracted {len(current_df)} current registry rows.")
     
-    # If a database file exists and is not completely empty, compare current state to previous state
     if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
         print("Loading previous baseline for comparison...")
         previous_df = pd.read_csv(DATA_FILE)
@@ -137,7 +131,6 @@ def main():
     else:
         print("\nNo previous data found. Establishing a new baseline...")
         
-    # Overwrite the old database with the new state
     current_df.to_csv(DATA_FILE, index=False)
     print(f"\nState saved to {DATA_FILE}. Run this script again tomorrow to detect changes.")
 
