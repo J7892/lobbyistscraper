@@ -4,7 +4,6 @@ alberta_lobbyist_scraper.py
 import os
 import io
 import pandas as pd
-from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 DATA_FILE = "alberta_lobbyists.csv"
@@ -35,56 +34,44 @@ def fetch_registry_data():
         html_content = page.content()
         browser.close()
         
-        soup = BeautifulSoup(html_content, 'html.parser')
-        target_table = None
-        
-        # Strategy 1: Find the definitive Oracle APEX Interactive Report data grid class
-        print("Searching for table by class 'apexir_WORKSHEET_DATA'...")
-        target_table = soup.find('table', class_='apexir_WORKSHEET_DATA')
-        
-        # Strategy 2: Fallback to searching any table containing standard keywords safely
-        if target_table is None:
-            print("Class not found. Falling back to text-based pattern matching...")
-            for table in soup.find_all('table'):
-                table_text = table.text.lower()
-                if "filing" in table_text and "organization" in table_text:
-                    target_table = table
-                    break
-                    
-        # Strategy 3: Fallback to selecting the table with the highest row density
-        if target_table is None:
-            print("Text matching failed. Falling back to max row-count table selector...")
-            all_tables = soup.find_all('table')
-            if all_tables:
-                target_table = max(all_tables, key=lambda t: len(t.find_all('tr')))
-                
-        if target_table is None:
-            print("Failed to isolate any usable data tables from the page layout.")
+        try:
+            # Let Pandas extract every single table structure from the full page layout
+            tables = pd.read_html(io.StringIO(html_content))
+            print(f"Pandas extracted {len(tables)} potential tables from the page.")
+        except Exception as e:
+            print(f"Pandas failed to parse the page HTML: {e}")
             return None
             
-        try:
-            # Parse the isolated table structure
-            tables = pd.read_html(io.StringIO(str(target_table)))
-            if not tables:
-                print("Pandas successfully read the table but found zero rows.")
-                return None
-            data_table = tables[0]
-        except Exception as e:
-            print(f"Pandas exception encountered during structural parsing: {e}")
+        data_table = None
+        
+        # Loop through all extracted tables to pinpoint the genuine registry data grid
+        for i, df in enumerate(tables):
+            # Flatten or stringify headers to look for target text patterns
+            col_headers = [str(col).upper() for col in df.columns]
+            
+            # Check if this table has the distinctive lobbyist registry columns
+            is_registry_grid = any("REGISTRATION" in col or "FILING" in col for col in col_headers)
+            
+            if is_registry_grid and len(df) > 0:
+                print(f"Found the registry data grid at table index {i}!")
+                data_table = df
+                
+                # Standardize columns to clean uppercase strings
+                data_table.columns = [str(col).strip().upper() for col in data_table.columns]
+                break
+                
+        if data_table is None:
+            print("Failed to identify the data grid using header keyword matching.")
             return None
-        
-        print(f"Successfully located a table grid with shape: {data_table.shape}")
-        
-        # Clean up columns formatting
-        data_table.columns = [str(col).strip().upper() for col in data_table.columns]
-        
-        # Drop operational columns if they exist (like action links)
+            
+        # Clean up utility or operational columns if they are present
         if 'VIEW' in data_table.columns:
             data_table = data_table.drop(columns=['VIEW'])
             
         return data_table
 
 def identify_changes(old_df, new_df):
+    # Dynamically find the primary ID/Registration column
     possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
     
     if not possible_id_cols:
@@ -92,7 +79,7 @@ def identify_changes(old_df, new_df):
     else:
         id_col = possible_id_cols[0]
         
-    print(f"Tracking registry records via column identity: '{id_col}'")
+    print(f"Tracking registry entries using identifier column: '{id_col}'")
     
     old_df[id_col] = old_df[id_col].astype(str)
     new_df[id_col] = new_df[id_col].astype(str)
@@ -124,12 +111,12 @@ def main():
     
     current_df = fetch_registry_data()
     if current_df is None or current_df.empty:
-        print("Parsing returned an empty data state. Halting output modification to protect baseline.")
+        print("Scraper execution returned no data. Halting file changes to protect baseline database.")
         return
         
-    print(f"Successfully processed {len(current_df)} distinct registry rows.")
+    print(f"Successfully processed {len(current_df)} rows from the active registry window.")
     
-    # Verify baseline readability and confirm it contains actual data headers
+    # Confirm if a functional baseline history exists to check against
     is_baseline_valid = False
     if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
         try:
@@ -140,7 +127,7 @@ def main():
             is_baseline_valid = False
 
     if is_baseline_valid:
-        print("Loading baseline snapshot data...")
+        print("Loading baseline snapshot history for change analysis...")
         previous_df = pd.read_csv(DATA_FILE)
         
         new_recs, removed_recs, changed_recs = identify_changes(previous_df, current_df)
@@ -161,10 +148,11 @@ def main():
             print(f"  -> Record ID {change['id']} changed: {change['changes']}")
             
     else:
-        print("\nNo valid baseline snapshot data detected. Writing clean system master baseline...")
+        print("\nNo tracking data found or baseline file was blank. Establishing a fresh tracking database...")
         
+    # Write data straight to the CSV, overwriting the old blank file template
     current_df.to_csv(DATA_FILE, index=False)
-    print(f"\nMaster baseline successfully populated and updated inside {DATA_FILE}.")
+    print(f"\nDatabase cleanly updated and synchronized inside '{DATA_FILE}'.")
 
 if __name__ == "__main__":
     main()
