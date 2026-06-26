@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 DATA_FILE = "alberta_lobbyists.csv"
 BASE_URL = "https://albertalobbyistregistry.ca/"
 
-def fetch_registry_data(diagnostic_holder):
+def fetch_registry_data():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -17,86 +17,78 @@ def fetch_registry_data(diagnostic_holder):
         )
         page = context.new_page()
         
-        try:
-            print(f"Navigating to {BASE_URL}...")
-            page.goto(BASE_URL, wait_until="networkidle")
+        print(f"Navigating to {BASE_URL}...")
+        page.goto(BASE_URL, wait_until="networkidle")
+        
+        print("Clicking into the 'Search Registry' portal...")
+        page.locator("text=Search Registry").first.click()
+        page.wait_for_load_state("networkidle")
+        
+        print("Clicking the specific 'Search' button element...")
+        page.locator("input#Search").click()
+        
+        print("Waiting 15 seconds for search results to generate...")
+        page.wait_for_timeout(15000)
+        
+        print("Extracting data matrix directly from the browser DOM...")
+        # Execute JavaScript directly in the browser context to rip clean text values
+        matrix = page.evaluate("""() => {
+            const tables = Array.from(document.querySelectorAll('table'));
+            // Find the core data table containing the key registration text
+            const targetTable = tables.find(t => t.innerText && t.innerText.includes('Registration Number'));
+            if (!targetTable) return null;
             
-            print("Clicking into the 'Search Registry' portal...")
-            page.locator("text=Search Registry").first.click()
-            page.wait_for_load_state("networkidle")
-            
-            print("Clicking the specific 'Search' button element...")
-            page.locator("input#Search").click()
-            
-            print("Waiting 15 seconds for search results to generate...")
-            page.wait_for_timeout(15000)
-            
-            # Take a debug screenshot for tracking artifact generation
-            page.screenshot(path="debug_screenshot.png", full_page=True)
-            
-            print("Harvesting all visible table rows via Playwright locators...")
-            raw_matrix = []
-            # Find every single row element on the page natively using the browser engine
-            tr_elements = page.locator("tr").all()
-            print(f"Discovered {len(tr_elements)} raw row elements on the page layout.")
-            
-            for tr in tr_elements:
-                cells = tr.locator("th, td").all_inner_texts()
-                # Clean up whitespace inside each cell string
-                cells_cleaned = [str(c).strip() for c in cells]
-                if cells_cleaned and any(cells_cleaned): # Ensure row isn't entirely empty tokens
-                    raw_matrix.append(cells_cleaned)
-                    
-        except Exception as e:
-            msg = f"Browser automation harvesting routine failed: {str(e)}"
-            print(msg)
-            diagnostic_holder["reason"] = msg
-            browser.close()
-            return None
-            
+            const rows = Array.from(targetTable.querySelectorAll('tr'));
+            return rows.map(row => {
+                const cells = Array.from(row.querySelectorAll('th, td'));
+                return cells.map(c => c.innerText ? c.innerText.trim() : '');
+            });
+        }""")
+        
         browser.close()
         
-        if not raw_matrix:
-            diagnostic_holder["reason"] = "Playwright successfully scanned the page elements but found zero table rows (tr)."
+        if not matrix or len(matrix) < 2:
+            print("Failed to isolate the registry grid via browser DOM evaluation.")
             return None
             
-        # Locate the header row by scanning for target keywords
-        header_row = None
-        data_start_idx = 0
+        print(f"Browser successfully extracted a text matrix with {len(matrix)} raw elements.")
         
-        for idx, row in enumerate(raw_matrix):
-            row_upper = [str(cell).upper() for cell in row]
-            if any("FILING" in cell or "ORGANIZATION" in cell or "REGISTRATION" in cell for cell in row_upper):
-                header_row = [str(cell).upper() for cell in row]
+        # Dynamically find the header row index
+        header_row = None
+        data_start_idx = 1
+        for idx, row in enumerate(matrix):
+            if any("REGISTRATION" in str(cell).upper() for cell in row):
+                header_row = [str(cell).strip().upper() for cell in row]
                 data_start_idx = idx + 1
-                print(f"Identified data grid header at row index {idx}: {header_row}")
                 break
                 
         if not header_row:
-            sample_rows = [str(r) for r in raw_matrix[:5]]
-            diagnostic_holder["reason"] = f"Found rows but none matched the expected headers. Sample: {'; '.join(sample_rows)}"
+            print("Could not find a row containing the expected column headers.")
             return None
             
-        # Clean up any empty column names (like an unlabeled action or view link column)
+        # Clean up empty header values (like the unlabeled first column link)
         header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
         
-        # Parse data rows matching header structure lengths
+        # Conform all data row lengths to header lengths to avoid Pandas construction issues
         cleaned_rows = []
-        for row in raw_matrix[data_start_idx:]:
+        for row in matrix[data_start_idx:]:
+            if not any(row):  # Skip completely blank lines
+                continue
             if len(row) == len(header_row):
                 cleaned_rows.append(row)
             elif len(row) > len(header_row):
                 cleaned_rows.append(row[:len(header_row)])
             else:
                 cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
-                
+        
         if not cleaned_rows:
-            diagnostic_holder["reason"] = "Located the header row, but found zero subsequent data rows underneath it."
+            print("No data rows remained after structural sanitization.")
             return None
             
+        # Create our clean DataFrame
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
-        # Drop operational columns if they are present
+        # Drop completely blank column templates or navigation columns
         cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
         if cols_to_drop:
             data_table = data_table.drop(columns=cols_to_drop)
@@ -105,9 +97,14 @@ def fetch_registry_data(diagnostic_holder):
 
 def identify_changes(old_df, new_df):
     possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
-    id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
-    print(f"Tracking registry records using identifier key: '{id_col}'")
+    if not possible_id_cols:
+        id_col = new_df.columns[0]
+    else:
+        id_col = possible_id_cols[0]
+        
+    print(f"Tracking registry entries using identifier column: '{id_col}'")
+    
     old_df[id_col] = old_df[id_col].astype(str)
     new_df[id_col] = new_df[id_col].astype(str)
     
@@ -136,32 +133,26 @@ def identify_changes(old_df, new_df):
 def main():
     print("Starting Alberta Lobbyist Registry Scraper...")
     
-    diagnostic_holder = {"reason": "Unknown processing mismatch encountered within the data pipeline."}
-    current_df = fetch_registry_data(diagnostic_holder)
-    
+    current_df = fetch_registry_data()
     if current_df is None or current_df.empty:
-        print("Scraper execution returned zero data rows. Compiling diagnostic tracking report.")
-        diagnostic_df = pd.DataFrame([{
-            "SCRAPER_STATUS": "FAILED", 
-            "DIAGNOSTIC_LOG": diagnostic_holder["reason"]
-        }])
-        diagnostic_df.to_csv(DATA_FILE, index=False)
+        print("Scraper execution returned no data. Halting file changes to protect baseline database.")
         return
         
-    print(f"Successfully processed {len(current_df)} rows from the data grid.")
+    print(f"Successfully processed {len(current_df)} rows from the active registry window.")
     
     is_baseline_valid = False
     if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
         try:
             previous_df = pd.read_csv(DATA_FILE)
-            if not previous_df.empty and "SCRAPER_STATUS" not in previous_df.columns:
+            if not previous_df.empty and len(previous_df.columns) > 1:
                 is_baseline_valid = True
         except Exception:
             is_baseline_valid = False
 
     if is_baseline_valid:
-        print("Loading baseline history for change verification...")
+        print("Loading baseline snapshot history for change analysis...")
         previous_df = pd.read_csv(DATA_FILE)
+        
         new_recs, removed_recs, changed_recs = identify_changes(previous_df, current_df)
         
         print("\n=== POTENTIAL NEWS STORIES & ALERTS ===")
@@ -180,10 +171,10 @@ def main():
             print(f"  -> Record ID {change['id']} changed: {change['changes']}")
             
     else:
-        print("\nNo tracking data found or baseline file was blank. Establishing fresh master baseline tracking file...")
+        print("\nNo tracking data found or baseline file was blank. Establishing a fresh tracking database...")
         
     current_df.to_csv(DATA_FILE, index=False)
-    print(f"\nMaster baseline successfully populated and updated inside '{DATA_FILE}'.")
+    print(f"\nDatabase cleanly updated and synchronized inside '{DATA_FILE}'.")
 
 if __name__ == "__main__":
     main()
