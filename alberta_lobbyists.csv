@@ -1,2 +1,5 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,The script executed successfully but failed to isolate the internal APEX worksheet grid cells. Review the system artifacts to troubleshoot page states.
+FAILED,"Browser automation navigation or click failed: Page.wait_for_selector: Timeout 45000ms exceeded.
+Call log:
+  - waiting for locator(""text=Registration Number"") to be visible
+"
