@@ -24,20 +24,17 @@ def fetch_registry_data(diagnostic_holder):
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
             
-            # Allow the mobile layout framework to fully initialize and bind button elements
-            print("Waiting for network and scripts to become stable...")
+            print("Waiting for the Search Portal page context to initialize...")
+            page.wait_for_selector("input#Search", timeout=30000)
             page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(3000)  # 3-second buffer to let framework scripts bind completely
             
-            # --- CRITICAL FIX: Target the actual visible button wrapper text element ---
-            print("Locating the visible 'Search' button element layer...")
-            visible_search_btn = page.locator("span.ui-btn-text", has_text="Search").first
-            visible_search_btn.wait_for(state="visible", timeout=25000)
+            # --- CRITICAL FIX: Bypass actionability checks to strike the hidden element natively ---
+            print("Executing search query submission via forced interaction...")
+            page.locator("input#Search").click(force=True)
             
-            print("Clicking the visible 'Search' button container...")
-            visible_search_btn.click()
-            
-            print("Waiting 15 seconds for the database engine to populate rows...")
-            page.wait_for_timeout(15000)
+            print("Waiting 20 seconds for the backend database engine to generate rows...")
+            page.wait_for_timeout(20000)
             
         except Exception as e:
             msg = f"Browser automation navigation or interaction failed: {str(e)}"
@@ -50,48 +47,40 @@ def fetch_registry_data(diagnostic_holder):
         # Capture screen state for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        print("Harvesting row text matrices straight from the browser context...")
+        print("Harvesting highest density text matrix from the page DOM...")
         matrix = page.evaluate("""() => {
             const tables = Array.from(document.querySelectorAll('table'));
+            if (tables.length === 0) return null;
             
-            // Strategy 1: Check traditional tabular report layouts first
-            for (let table of tables) {
-                const trs = Array.from(table.querySelectorAll('tr'));
-                if (trs.length >= 2) {
-                    let tableRows = trs.map(tr => Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
-                    // Isolate the grid if it carries standard matching headers
-                    if (tableRows.some(row => row.some(cell => cell.toLowerCase().includes('filing') || cell.toLowerCase().includes('registration')))) {
-                        return tableRows;
-                    }
+            // Map every table element to a structured string array matrix
+            const matrices = tables.map(table => {
+                const rows = Array.from(table.querySelectorAll('tr'));
+                return rows.map(tr => 
+                    Array.from(tr.querySelectorAll('th, td')).map(cell => cell.innerText ? cell.innerText.trim() : '')
+                ).filter(row => row.length > 0);
+            }).filter(m => m.length > 0);
+            
+            if (matrices.length === 0) return null;
+            
+            // Automatically isolate the table holding the largest total cell grid area
+            let bestMatrix = matrices[0];
+            let maxCells = 0;
+            
+            for (const m of matrices) {
+                const totalCells = m.length * (m[0] ? m[0].length : 0);
+                if (totalCells > maxCells) {
+                    maxCells = totalCells;
+                    bestMatrix = m;
                 }
             }
             
-            // Strategy 2: Fallback to scanning custom division-based responsive list structures
-            const listItems = Array.from(document.querySelectorAll('li, div[class*="row"], div[class*="cell"]'));
-            let fallbackRows = [];
-            listItems.forEach(item => {
-                let txt = item.innerText ? item.innerText.trim() : '';
-                if (txt.includes('Registration Number') && (txt.includes('Filing Date') || txt.includes('Active'))) {
-                    let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
-                    if (lines.length > 0) fallbackRows.push(lines);
-                }
-            });
-            
-            if (fallbackRows.length > 0) return fallbackRows;
-            
-            // Strategy 3: Final fallback to extract the largest table array on screen by line volume
-            if (tables.length > 0) {
-                let largestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.querySelectorAll('tr').length ? t : max, tables[0]);
-                return Array.from(largestTable.querySelectorAll('tr')).map(tr => Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
-            }
-            
-            return null;
+            return bestMatrix;
         }""")
         
         browser.close()
         
         if not matrix or len(matrix) < 2:
-            diagnostic_holder["reason"] = "The browser loaded the page, but the adaptive DOM query failed to extract a table matrix."
+            diagnostic_holder["reason"] = "The browser loaded the page, but the structural density query failed to harvest a valid multi-row data grid."
             return None
             
         print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
@@ -115,9 +104,8 @@ def fetch_registry_data(diagnostic_holder):
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
         # Drop non-analytical operational columns if they populate
-        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
-        if cols_to_drop:
-            data_table = data_table.drop(columns=cols_to_drop)
+        if 'VIEW' in data_table.columns:
+            data_table = data_table.drop(columns=['VIEW'])
             
         return data_table
 
