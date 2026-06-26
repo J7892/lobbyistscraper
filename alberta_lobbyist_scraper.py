@@ -2,7 +2,6 @@
 alberta_lobbyist_scraper.py
 """
 import os
-import io
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -24,71 +23,83 @@ def fetch_registry_data(diagnostic_holder):
             
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
-            
-            print("Waiting for the Search Portal page context to appear...")
-            page.wait_for_selector("input#Search", timeout=25000)
-            
-            # --- CRITICAL FIX: Wait for the JavaScript framework to fully initialize ---
-            print("Ensuring page scripts and network channels are stable...")
             page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(2000) # 2-second safety buffer for event binding
             
-            print("Submitting the search query via the native APEX engine...")
-            page.evaluate("apex.submit('SEARCH')")
+            print("Clicking the specific 'Search' button element...")
+            page.locator("input#Search").click()
             
-            print("Waiting 15 seconds for the database grid to completely render...")
+            print("Waiting 15 seconds for search results to generate...")
             page.wait_for_timeout(15000)
             
+            # Take a debug screenshot for tracking artifact generation
+            page.screenshot(path="debug_screenshot.png", full_page=True)
+            
+            print("Harvesting all visible table rows via Playwright locators...")
+            raw_matrix = []
+            # Find every single row element on the page natively using the browser engine
+            tr_elements = page.locator("tr").all()
+            print(f"Discovered {len(tr_elements)} raw row elements on the page layout.")
+            
+            for tr in tr_elements:
+                cells = tr.locator("th, td").all_inner_texts()
+                # Clean up whitespace inside each cell string
+                cells_cleaned = [str(c).strip() for c in cells]
+                if cells_cleaned and any(cells_cleaned): # Ensure row isn't entirely empty tokens
+                    raw_matrix.append(cells_cleaned)
+                    
         except Exception as e:
-            msg = f"Browser automation navigation or page sync failed: {str(e)}"
+            msg = f"Browser automation harvesting routine failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
-            page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
-        # Capture an updated screenshot for artifact tracking
-        page.screenshot(path="debug_screenshot.png", full_page=True)
-        html_content = page.content()
         browser.close()
         
-        try:
-            # Let Pandas extract all structural tables on the page
-            tables = pd.read_html(io.StringIO(html_content))
-            print(f"Pandas parsed {len(tables)} structural tables from the target layout.")
-        except Exception as e:
-            diagnostic_holder["reason"] = f"Pandas structural parsing exception: {str(e)}"
+        if not raw_matrix:
+            diagnostic_holder["reason"] = "Playwright successfully scanned the page elements but found zero table rows (tr)."
             return None
             
-        data_table = None
-        table_diagnostics = []
+        # Locate the header row by scanning for target keywords
+        header_row = None
+        data_start_idx = 0
         
-        # Deep inspection of all discovered tables to find the genuine grid
-        for idx, df in enumerate(tables):
-            if df.empty:
-                continue
-                
-            # Flatten columns and top data row to look for target keywords
-            cols_clean = [str(c).upper() for c in df.columns]
-            first_row_clean = [str(x).upper() for x in df.iloc[0].values] if len(df) > 0 else []
-            combined_fingerprint = " ".join(cols_clean + first_row_clean)
-            
-            table_diagnostics.append(f"Table {idx} shape={df.shape} text='{combined_fingerprint[:60]}...'")
-            
-            # Look for fuzzy matching signature columns
-            if any("REGISTRATION" in token or "FILING" in token for token in cols_clean + first_row_clean):
-                print(f"Match found! Target registry grid isolated at table index {idx}.")
-                data_table = df
+        for idx, row in enumerate(raw_matrix):
+            row_upper = [str(cell).upper() for cell in row]
+            if any("FILING" in cell or "ORGANIZATION" in cell or "REGISTRATION" in cell for cell in row_upper):
+                header_row = [str(cell).upper() for cell in row]
+                data_start_idx = idx + 1
+                print(f"Identified data grid header at row index {idx}: {header_row}")
                 break
                 
-        if data_table is None:
-            diagnostic_holder["reason"] = f"Failed to match registry keywords against table signatures. Discovered: {'; '.join(table_diagnostics)}"
+        if not header_row:
+            sample_rows = [str(r) for r in raw_matrix[:5]]
+            diagnostic_holder["reason"] = f"Found rows but none matched the expected headers. Sample: {'; '.join(sample_rows)}"
             return None
             
-        # Clean up columns format
-        data_table.columns = [str(col).strip().upper() for col in data_table.columns]
-        if 'VIEW' in data_table.columns:
-            data_table = data_table.drop(columns=['VIEW'])
+        # Clean up any empty column names (like an unlabeled action or view link column)
+        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
+        
+        # Parse data rows matching header structure lengths
+        cleaned_rows = []
+        for row in raw_matrix[data_start_idx:]:
+            if len(row) == len(header_row):
+                cleaned_rows.append(row)
+            elif len(row) > len(header_row):
+                cleaned_rows.append(row[:len(header_row)])
+            else:
+                cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
+                
+        if not cleaned_rows:
+            diagnostic_holder["reason"] = "Located the header row, but found zero subsequent data rows underneath it."
+            return None
+            
+        data_table = pd.DataFrame(cleaned_rows, columns=header_row)
+        
+        # Drop operational columns if they are present
+        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
+        if cols_to_drop:
+            data_table = data_table.drop(columns=cols_to_drop)
             
         return data_table
 
