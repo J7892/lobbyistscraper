@@ -26,57 +26,58 @@ def fetch_registry_data(diagnostic_holder):
             page.locator("text=Search Registry").first.click()
             page.wait_for_load_state("networkidle")
             
-            # --- CRITICAL FIX: Target the actual visible button text layer ---
-            print("Locating the visible 'Search' action trigger...")
-            visible_search_btn = page.locator("span.ui-btn-text").filter(has_text="Search").first
-            visible_search_btn.wait_for(state="visible", timeout=25000)
+            # Use the deterministic button locator that successfully loaded the grid previously
+            print("Clicking the main 'Search' button element...")
+            page.locator("input#Search").click()
             
-            print("Clicking the visible 'Search' button...")
-            visible_search_btn.click()
-            
-            # Wait for the actual data table headers to load on screen
-            print("Waiting for data table rows to render...")
-            page.wait_for_selector("text=Registration Number", timeout=30000)
-            print("Registry grid successfully initialized!")
-            
-            # Small 3-second safety window to ensure AJAX data frames finish populating
-            page.wait_for_timeout(3000)
+            print("Waiting 15 seconds for the database engine to populate rows...")
+            page.wait_for_timeout(15000)
             
         except Exception as e:
-            msg = f"Browser execution failed to execute query: {str(e)}"
+            msg = f"Browser automation navigation or interaction failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
             page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
+        # Capture screen state for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
         html_content = page.content()
         browser.close()
         
         try:
-            # Re-introduce pandas read_html to cleanly parse the validated grid markup
+            # Parse all tables out of the raw HTML layout
             tables = pd.read_html(io.StringIO(html_content))
-            print(f"Pandas parsed {len(tables)} structural elements from layout content.")
+            print(f"Pandas parsed {len(tables)} total tables from the page layout.")
         except Exception as e:
-            diagnostic_holder["reason"] = f"Pandas failed to structurally parse layout: {str(e)}"
+            diagnostic_holder["reason"] = f"Pandas failed to extract table frameworks: {str(e)}"
             return None
             
-        data_table = None
+        # --- FIX: Isolate the data grid strictly by shape metrics rather than text matching ---
+        valid_data_tables = []
         for idx, df in enumerate(tables):
             if df.empty:
                 continue
-            cols_clean = [str(c).upper() for c in df.columns]
-            if any("REGISTRATION" in col or "FILING" in col for col in cols_clean):
-                print(f"Isolated genuine data matrix at index {idx}.")
-                data_table = df
-                data_table.columns = [str(c).strip().upper() for c in data_table.columns]
-                break
+            # Real data grids in this portal have at least 4 data columns and multiple entries
+            if df.shape[1] >= 4 and df.shape[0] >= 2:
+                valid_data_tables.append((idx, df))
                 
-        if data_table is None:
-            diagnostic_holder["reason"] = "Query submitted successfully, but column signature matching failed."
+        if not valid_data_tables:
+            # Fallback log tracking if structural signatures aren't met
+            meta_strings = [f"Table_{i}(cols={t.shape[1]}, rows={t.shape[0]})" for i, t in enumerate(tables)]
+            diagnostic_holder["reason"] = f"No tables matched size constraints. Detected layouts: {', '.join(meta_strings)}"
             return None
             
+        # Select the table containing the highest overall cell volume (Rows x Columns)
+        best_match = max(valid_data_tables, key=lambda item: item[1].shape[0] * item[1].shape[1])
+        print(f"Successfully isolated the target registry data grid at table index {best_match[0]}.")
+        data_table = best_match[1]
+        
+        # Format and clean header rows uniformly
+        data_table.columns = [str(col).strip().upper() for col in data_table.columns]
+        
+        # Drop non-analytical action links if they appear
         if 'VIEW' in data_table.columns:
             data_table = data_table.drop(columns=['VIEW'])
             
@@ -115,7 +116,7 @@ def identify_changes(old_df, new_df):
 def main():
     print("Starting Alberta Lobbyist Registry Scraper...")
     
-    diagnostic_holder = {"reason": "Unknown parsing mismatch encountered within the data pipeline."}
+    diagnostic_holder = {"reason": "Unknown processing mismatch encountered within the data pipeline."}
     current_df = fetch_registry_data(diagnostic_holder)
     
     if current_df is None or current_df.empty:
