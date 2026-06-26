@@ -2,6 +2,7 @@
 alberta_lobbyist_scraper.py
 """
 import os
+import io
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -23,89 +24,76 @@ def fetch_registry_data(diagnostic_holder):
             
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
-            page.wait_for_load_state("networkidle")
             
-            # --- FIX: Bypass the hidden button and trigger the form submission via JavaScript ---
-            print("Submitting the search query via the native APEX engine...")
-            page.evaluate("apex.submit('SEARCH')")
+            # --- CRITICAL FIX: Stop and anchor here until the search page element is visible ---
+            print("Waiting for the Search Portal page context to load...")
+            page.wait_for_selector("input#Search", timeout=25000)
+            print("Search Portal loaded successfully. Executing search query...")
             
-            print("Waiting for the network to become idle...")
-            page.wait_for_load_state("networkidle")
+            # Click the search button directly now that we know we are on the right page
+            page.locator("input#Search").click()
             
-            # Give the database engine a comfortable 10 seconds to process and draw the rows
-            print("Allowing the data grid 10 seconds to completely render...")
-            page.wait_for_timeout(10000)
+            print("Waiting 15 seconds for the database grid to completely render...")
+            page.wait_for_timeout(15000)
             
         except Exception as e:
-            msg = f"Browser automation navigation or form submission failed: {str(e)}"
+            msg = f"Browser automation navigation or page sync failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
             page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
-        # Take a screenshot to capture the page state for verification
+        # Capture an updated screenshot for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
-        
-        print("Extracting table rows from the live browser DOM...")
-        matrix = page.evaluate("""() => {
-            const tables = Array.from(document.querySelectorAll('table'));
-            // Look for any table that contains the core column headers
-            const targetTable = tables.find(t => t.innerText && (t.innerText.includes('Registration Number') || t.innerText.includes('Filing Date')));
-            if (!targetTable) return null;
-            
-            const rows = Array.from(targetTable.querySelectorAll('tr'));
-            return rows.map(row => {
-                const cells = Array.from(row.querySelectorAll('th, td'));
-                return cells.map(c => c.innerText ? c.innerText.trim() : '');
-            });
-        }""")
-        
-        # Save a copy of the raw visible text on the page to aid diagnostics if extraction returns empty
-        page_text = page.locator("body").inner_text()
+        html_content = page.content()
         browser.close()
         
-        if not matrix or len(matrix) < 2:
-            snippet = page_text[:300].replace('\n', ' ') if page_text else "No visible text"
-            diagnostic_holder["reason"] = f"The query executed but no data table was found. Visible page text snippet: {snippet}"
+        try:
+            # Let Pandas extract all structural tables on the page
+            tables = pd.read_html(io.StringIO(html_content))
+            print(f"Pandas parsed {len(tables)} structural tables from the target layout.")
+        except Exception as e:
+            diagnostic_holder["reason"] = f"Pandas structural parsing exception: {str(e)}"
             return None
             
-        print(f"Browser successfully parsed a text matrix containing {len(matrix)} rows.")
+        data_table = None
+        table_diagnostics = []
         
-        # Isolate and sanitize headers
-        header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
-        
-        cleaned_rows = []
-        for row in matrix[1:]:
-            if not any(row):  # Skip empty lines
+        # Deep inspection of all discovered tables to find the genuine grid
+        for idx, df in enumerate(tables):
+            if df.empty:
                 continue
-            if len(row) == len(header_row):
-                cleaned_rows.append(row)
-            elif len(row) > len(header_row):
-                cleaned_rows.append(row[:len(header_row)])
-            else:
-                cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
                 
-        data_table = pd.DataFrame(cleaned_rows, columns=header_row)
-        
-        # Drop operational tracking columns if they appear
-        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
-        if cols_to_drop:
-            data_table = data_table.drop(columns=cols_to_drop)
+            # Flatten columns and top data row to look for target keywords
+            cols_clean = [str(c).upper() for c in df.columns]
+            first_row_clean = [str(x).upper() for x in df.iloc[0].values] if len(df) > 0 else []
+            combined_fingerprint = " ".join(cols_clean + first_row_clean)
+            
+            table_diagnostics.append(f"Table {idx} shape={df.shape} text='{combined_fingerprint[:60]}...'")
+            
+            # Look for fuzzy matching signature columns
+            if any("REGISTRATION" in token or "FILING" in token for token in cols_clean + first_row_clean):
+                print(f"Match found! Target registry grid isolated at table index {idx}.")
+                data_table = df
+                break
+                
+        if data_table is None:
+            diagnostic_holder["reason"] = f"Failed to match registry keywords against table signatures. Discovered: {'; '.join(table_diagnostics)}"
+            return None
+            
+        # Clean up columns format
+        data_table.columns = [str(col).strip().upper() for col in data_table.columns]
+        if 'VIEW' in data_table.columns:
+            data_table = data_table.drop(columns=['VIEW'])
             
         return data_table
 
 def identify_changes(old_df, new_df):
     possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
+    id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
-    if not possible_id_cols:
-        id_col = new_df.columns[0]
-    else:
-        id_col = possible_id_cols[0]
-        
-    print(f"Tracking registry records using unique column key: '{id_col}'")
-    
+    print(f"Tracking registry records using identifier key: '{id_col}'")
     old_df[id_col] = old_df[id_col].astype(str)
     new_df[id_col] = new_df[id_col].astype(str)
     
@@ -134,11 +122,11 @@ def identify_changes(old_df, new_df):
 def main():
     print("Starting Alberta Lobbyist Registry Scraper...")
     
-    diagnostic_holder = {"reason": "Unknown parsing exception encountered inside extraction loops."}
+    diagnostic_holder = {"reason": "Unknown processing mismatch encountered within the data pipeline."}
     current_df = fetch_registry_data(diagnostic_holder)
     
     if current_df is None or current_df.empty:
-        print("Scraper execution returned zero data records. Generating specific diagnostic tracking file.")
+        print("Scraper execution returned zero data rows. Compiling diagnostic tracking report.")
         diagnostic_df = pd.DataFrame([{
             "SCRAPER_STATUS": "FAILED", 
             "DIAGNOSTIC_LOG": diagnostic_holder["reason"]
@@ -160,7 +148,6 @@ def main():
     if is_baseline_valid:
         print("Loading baseline history for change verification...")
         previous_df = pd.read_csv(DATA_FILE)
-        
         new_recs, removed_recs, changed_recs = identify_changes(previous_df, current_df)
         
         print("\n=== POTENTIAL NEWS STORIES & ALERTS ===")
@@ -179,7 +166,7 @@ def main():
             print(f"  -> Record ID {change['id']} changed: {change['changes']}")
             
     else:
-        print("\nNo functional tracking baseline detected. Establishing fresh master baseline tracking file...")
+        print("\nNo tracking data found or baseline file was blank. Establishing fresh master baseline tracking file...")
         
     current_df.to_csv(DATA_FILE, index=False)
     print(f"\nMaster baseline successfully populated and updated inside '{DATA_FILE}'.")
