@@ -25,13 +25,16 @@ def fetch_registry_data(diagnostic_holder):
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
             
-            # --- CRITICAL FIX: Stop and anchor here until the search page element is visible ---
-            print("Waiting for the Search Portal page context to load...")
+            print("Waiting for the Search Portal page context to appear...")
             page.wait_for_selector("input#Search", timeout=25000)
-            print("Search Portal loaded successfully. Executing search query...")
             
-            # Click the search button directly now that we know we are on the right page
-            page.locator("input#Search").click()
+            # --- CRITICAL FIX: Wait for the JavaScript framework to fully initialize ---
+            print("Ensuring page scripts and network channels are stable...")
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(2000) # 2-second safety buffer for event binding
+            
+            print("Submitting the search query via the native APEX engine...")
+            page.evaluate("apex.submit('SEARCH')")
             
             print("Waiting 15 seconds for the database grid to completely render...")
             page.wait_for_timeout(15000)
