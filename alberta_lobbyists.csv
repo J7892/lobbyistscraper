@@ -1,2 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"The browser successfully loaded the page, but the internal DOM query failed to locate the data grid layout container."
+FAILED,"The browser loaded the page, but the adaptive DOM query failed to extract a table matrix."
