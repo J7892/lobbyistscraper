@@ -24,11 +24,15 @@ def fetch_registry_data(diagnostic_holder):
             print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
             
-            print("Waiting for the Search Portal page context to appear...")
-            page.wait_for_selector("input#Search", timeout=25000)
+            # Ensure the search portal page context and scripts are fully initialized
+            print("Waiting for network and scripts to become stable...")
+            page.wait_for_load_state("networkidle")
+            
+            search_button = page.locator("input#Search")
+            search_button.wait_for(state="visible", timeout=25000)
             
             print("Clicking the main 'Search' button element...")
-            page.locator("input#Search").click()
+            search_button.click()
             
             print("Waiting 15 seconds for the database engine to populate rows...")
             page.wait_for_timeout(15000)
@@ -44,27 +48,32 @@ def fetch_registry_data(diagnostic_holder):
         # Capture screen state for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        # --- FIX: Extract raw cell data directly via the browser DOM ---
         print("Harvesting row text matrices straight from the browser context...")
         matrix = page.evaluate("""() => {
-            // Target the main Oracle APEX data table container dynamically
-            const reportTable = document.querySelector('.a-IRR-table') || 
-                                document.querySelector('.apexir_WORKSHEET_DATA') ||
-                                Array.from(document.querySelectorAll('table')).find(t => {
-                                    const text = t.innerText || '';
-                                    return text.includes('Registration Number') && text.includes('Designated Filer');
-                                });
-                                
-            if (!reportTable) return null;
+            const tables = Array.from(document.querySelectorAll('table'));
+            if (tables.length === 0) return null;
             
-            const rows = Array.from(reportTable.querySelectorAll('tr'));
+            // Look for any table containing the key column header visible on screen
+            let targetTable = tables.find(t => t.innerText && t.innerText.toLowerCase().includes('filing date'));
+            
+            # Fallback: If text matching fails, grab the largest table by total row count
+            if (!targetTable) {
+                targetTable = tables.reduce((max, t) => {
+                    const rows = t.querySelectorAll('tr').length;
+                    return rows > max.rows ? {table: t, rows: rows} : max;
+                }, {table: null, rows: 0}).table;
+            }
+            
+            if (!targetTable) return null;
+            
+            const rows = Array.from(targetTable.querySelectorAll('tr'));
             return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
         }""")
         
         browser.close()
         
         if not matrix or len(matrix) < 2:
-            diagnostic_holder["reason"] = "The browser successfully loaded the page, but the internal DOM query failed to locate the data grid layout container."
+            diagnostic_holder["reason"] = "The browser loaded the page, but the adaptive DOM query failed to extract a table matrix."
             return None
             
         print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
