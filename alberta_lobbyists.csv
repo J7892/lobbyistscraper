@@ -1,4 +1,7 @@
-FILING AN INITIAL RETURN
-Changing a Registration
-Terminating a Registration
-Notices of Removal of Registration
+SCRAPER_STATUS,DIAGNOSTIC_LOG
+FAILED,"Browser execution failed to execute query: Page.wait_for_selector: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator(""text=Registration Number"") to be visible
+    - waiting for"" https://albertalobbyistregistry.ca/apex/f?p=171:9996:14929940514235::::CMS_SITE,CMS_PAGE:ABLBY,SRCH_REG"" navigation to finish...
+    - navigated to ""https://albertalobbyistregistry.ca/apex/f?p=171:9996:14929940514235::::CMS_SITE,CMS_PAGE:ABLBY,SRCH_REG""
+"
