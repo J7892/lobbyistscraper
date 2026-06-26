@@ -1,2 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"The browser loaded the page, but the adaptive DOM query failed to extract a table matrix."
+FAILED,"The browser loaded the page, but the structural density query failed to harvest a valid multi-row data grid."
