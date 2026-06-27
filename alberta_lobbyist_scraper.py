@@ -21,21 +21,45 @@ def fetch_registry_data(diagnostic_holder):
             print(f"Navigating to {BASE_URL}...")
             page.goto(BASE_URL, wait_until="networkidle")
             
-            # --- THE SMOKING GUN FIX: Anchor Navigation ---
-            print("Clicking into the 'Search Registry' portal via strict URL href...")
-            # We target the actual link destination instead of the visual text to bypass menu headers
-            page.locator("a[href*='SRCH_REG']").first.click()
+            print("Clicking into the 'Search Registry' portal via explicit APEX link...")
+            # Use force=True to ensure the click registers even if hidden inside a responsive menu wrapper
+            page.locator("a[href*='SRCH_REG']").first.click(force=True)
             
             print("Locking execution until the browser confirms arrival at the Search page...")
-            page.wait_for_url("**/*SRCH_REG*", timeout=25000)
+            page.wait_for_url("**/*SRCH_REG*", timeout=30000)
             page.wait_for_load_state("networkidle")
             
-            print("We are confirmed on the Search page. Clicking the database 'Search' button...")
-            page.locator("input#Search, button:has-text('Search')").first.click()
-            
-            print("Waiting 15 seconds for the backend database engine to generate rows...")
-            page.wait_for_timeout(15000)
-            
+            print("Checking if the APEX framework auto-loaded the initial registry rows...")
+            # Passively watch the DOM for up to 15 seconds to see if the table builds itself
+            table_loaded = False
+            for _ in range(15):
+                row_count = page.evaluate("""() => {
+                    const tables = Array.from(document.querySelectorAll('table'));
+                    let maxRows = 0;
+                    tables.forEach(t => {
+                        const rows = t.querySelectorAll('tr').length;
+                        if (rows > maxRows) maxRows = rows;
+                    });
+                    return maxRows;
+                }""")
+                
+                if row_count >= 5:
+                    table_loaded = True
+                    break
+                page.wait_for_timeout(1000)
+                
+            if not table_loaded:
+                print("Grid did not auto-load. Firing the native search trigger...")
+                page.evaluate("""() => {
+                    const btn = document.getElementById('Search');
+                    if (btn) btn.click();
+                }""")
+                print("Waiting 15 seconds for the database engine to generate rows...")
+                page.wait_for_timeout(15000)
+            else:
+                print("Data grid naturally detected on screen! Allowing 2 seconds for final text rendering...")
+                page.wait_for_timeout(2000)
+                
         except Exception as e:
             msg = f"Browser automation navigation or interaction failed: {str(e)}"
             print(msg)
@@ -47,42 +71,24 @@ def fetch_registry_data(diagnostic_holder):
         # Capture screen state for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        print("Harvesting all structural and list-based data matrices from the page DOM...")
+        print("Harvesting the largest data matrix from the page DOM...")
         matrix = page.evaluate("""() => {
-            let records = [];
-
-            // Strategy 1: Look for standard tabular report layouts
+            let bestMatrix = [];
             const tables = Array.from(document.querySelectorAll('table'));
+            
             for (let table of tables) {
                 const rows = Array.from(table.querySelectorAll('tr'));
-                if (rows.length >= 2) {
-                    let matrix = rows.map(tr => Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
-                    // Ensure the matrix has actual data columns
-                    if (matrix[0].length >= 3 && matrix.length > records.length) {
-                        records = matrix;
-                    }
+                // Map the table into a clean text matrix
+                let currentMatrix = rows.map(tr => {
+                    return Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.replace(/\\n/g, ' ').trim() : '');
+                }).filter(row => row.some(cell => cell.length > 0)); // Drop entirely empty spacer rows
+                
+                // Automatically keep the table that contains the most structural data
+                if (currentMatrix.length > bestMatrix.length) {
+                    bestMatrix = currentMatrix;
                 }
             }
-
-            // Strategy 2: Look for APEX mobile cards or list views if tables are hidden
-            if (records.length < 2) {
-                const listItems = Array.from(document.querySelectorAll('.ui-listview li, .a-IRR-tableContainer li, .report-data'));
-                let listMatrix = [];
-                listItems.forEach(item => {
-                    let txt = item.innerText ? item.innerText.trim() : '';
-                    if ((txt.includes('Filing Date') || txt.includes('Registration')) && !txt.includes('FILING AN INITIAL RETURN')) {
-                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
-                        if (lines.length >= 3) {
-                            listMatrix.push(lines);
-                        }
-                    }
-                });
-                if (listMatrix.length > 1) {
-                    records = listMatrix;
-                }
-            }
-
-            return records.length > 0 ? records : null;
+            return bestMatrix.length > 0 ? bestMatrix : null;
         }""")
         
         if not matrix or len(matrix) < 2:
@@ -98,7 +104,7 @@ def fetch_registry_data(diagnostic_holder):
         
         # Determine the header mapping
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col for col in header_row)
+        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col or "NAME" in col for col in header_row)
         
         if not is_header:
             max_len = max(len(r) for r in matrix)
