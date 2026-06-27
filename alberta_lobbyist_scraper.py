@@ -11,7 +11,6 @@ BASE_URL = "https://albertalobbyistregistry.ca/"
 def fetch_registry_data(diagnostic_holder):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Re-enforce a strict desktop viewport so the site doesn't load mobile menus
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
             viewport={'width': 1920, 'height': 1080}
@@ -19,121 +18,69 @@ def fetch_registry_data(diagnostic_holder):
         page = context.new_page()
         
         try:
+            # --- Using your exact working navigation sequence ---
             print(f"Navigating to {BASE_URL}...")
-            # Use domcontentloaded to prevent the scraper from hanging on persistent government network trackers
-            page.goto(BASE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
+            page.goto(BASE_URL, wait_until="networkidle")
             
-            # --- THE IRONCLAD NAVIGATION FIX ---
-            print("Bypassing UI clicks. Extracting direct session URL for Search Portal...")
-            search_portal_url = page.evaluate("""() => {
-                const links = Array.from(document.querySelectorAll('a'));
-                // Find the exact link that points to the internal SRCH_REG portal
-                const target = links.find(a => a.href && a.href.includes('SRCH_REG'));
-                return target ? target.href : null;
-            }""")
+            print("Clicking into the 'Search Registry' portal...")
+            page.locator("text=Search Registry").first.click()
+            page.wait_for_load_state("networkidle")
             
-            if not search_portal_url:
-                diagnostic_holder["reason"] = "CRITICAL: Could not find the Search Registry (SRCH_REG) link on the homepage DOM."
-                browser.close()
-                return None
-                
-            print(f"Direct URL found. Forcing browser navigation to: {search_portal_url}")
-            page.goto(search_portal_url, wait_until="domcontentloaded")
+            print("Clicking the specific 'Search' button element...")
+            page.locator("input#Search").click()
             
-            print("Confirming arrival on the Search portal...")
-            page.wait_for_selector("input#Search, button:has-text('Search')", timeout=20000)
-            page.wait_for_timeout(3000)  # 3-second buffer to allow framework scripts to bind completely
-            
-            print("Commanding the native APEX engine to execute the database search...")
-            # Bypassing the hidden visual UI elements to execute the core backend command
-            page.evaluate("""() => {
-                if (typeof apex !== 'undefined' && apex.submit) {
-                    apex.submit('SEARCH');
-                } else {
-                    const btn = document.getElementById('Search');
-                    if (btn) btn.click();
-                }
-            }""")
-            
-            print("Waiting 15 seconds for the backend database engine to generate rows...")
+            print("Waiting 15 seconds for search results to generate...")
             page.wait_for_timeout(15000)
             
         except Exception as e:
-            msg = f"Browser automation navigation or interaction failed: {str(e)}"
+            msg = f"Browser automation navigation or click failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
             page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
-        # Capture screen state for artifact tracking
+        # Take an updated debug screenshot for verification
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        print("Harvesting the structural data matrix from the page DOM...")
+        print("Extracting live table rows natively from the browser screen...")
         matrix = page.evaluate("""() => {
-            let bestMatrix = [];
-            
-            // Extract standard APEX tables
+            // Find all tables loaded on the page
             const tables = Array.from(document.querySelectorAll('table'));
-            for (let table of tables) {
-                const rows = Array.from(table.querySelectorAll('tr'));
-                let currentMatrix = rows.map(tr => {
-                    return Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.replace(/\\n/g, ' ').trim() : '');
-                }).filter(row => row.some(cell => cell.length > 0)); // Remove empty spacer rows
-                
-                if (currentMatrix.length > bestMatrix.length) {
-                    bestMatrix = currentMatrix;
-                }
+            if (tables.length === 0) return null;
+            
+            // Isolate the table that contains actual data headers
+            let targetTable = tables.find(t => t.innerText && t.innerText.toLowerCase().includes('filing date'));
+            
+            // Fallback: If strict word matching fails, grab the largest structural table visible
+            if (!targetTable) {
+                targetTable = tables.reduce((max, t) => {
+                    const rows = t.querySelectorAll('tr').length;
+                    return rows > max.rows ? {table: t, rows: rows} : max;
+                }, {table: null, rows: 0}).table;
             }
             
-            // Fallback for APEX mobile card lists if tables are suppressed
-            if (bestMatrix.length < 2) {
-                const cards = Array.from(document.querySelectorAll('.report-data, .ui-listview li, ul.a-IRR-list li'));
-                let listMatrix = [];
-                for (let c of cards) {
-                    let txt = c.innerText ? c.innerText.trim() : '';
-                    if ((txt.includes('Filing Date') || txt.includes('Registration')) && !txt.includes('FILING AN INITIAL RETURN')) {
-                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
-                        if (lines.length >= 3) {
-                            listMatrix.push(lines);
-                        }
-                    }
-                }
-                if (listMatrix.length > 1) {
-                    bestMatrix = listMatrix;
-                }
-            }
+            if (!targetTable) return null;
             
-            return bestMatrix.length > 0 ? bestMatrix : null;
+            const rows = Array.from(targetTable.querySelectorAll('tr'));
+            return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
         }""")
         
+        browser.close()
+        
         if not matrix or len(matrix) < 2:
-            body_text = page.locator("body").inner_text()
-            safe_text = body_text[:400].replace('\n', ' ') if body_text else 'No visible body text'
-            diagnostic_holder["reason"] = f"Extraction failed on search page. Page text snapshot: {safe_text}"
-            browser.close()
+            diagnostic_holder["reason"] = "The page loaded, but the browser engine failed to isolate rows inside the workspace grid container."
             return None
             
-        browser.close()
-            
-        print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
+        print(f"Browser successfully parsed a text matrix containing {len(matrix)} rows.")
         
-        # Determine the header mapping
+        # Clean and standardize the header titles
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col or "NAME" in col for col in header_row)
+        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
         
-        if not is_header:
-            max_len = max(len(r) for r in matrix)
-            header_row = [f"FIELD_{i}" for i in range(max_len)]
-            data_start_idx = 0
-        else:
-            header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
-            data_start_idx = 1
-            
         cleaned_rows = []
-        for row in matrix[data_start_idx:]:
-            if not any(row):  
+        for row in matrix[1:]:
+            if not any(row):  # Skip empty whitespace lines
                 continue
             if len(row) == len(header_row):
                 cleaned_rows.append(row)
@@ -142,9 +89,9 @@ def fetch_registry_data(diagnostic_holder):
             else:
                 cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
                 
-        # Build the final DataFrame
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
+        # Drop the action/view tracking links if they populate inside the grid
         cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
         if cols_to_drop:
             data_table = data_table.drop(columns=cols_to_drop)
@@ -152,10 +99,10 @@ def fetch_registry_data(diagnostic_holder):
         return data_table
 
 def identify_changes(old_df, new_df):
-    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
+    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
     id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
-    print(f"Tracking registry entries using identifier column: '{id_col}'")
+    print(f"Tracking registry records using identifier column: '{id_col}'")
     old_df[id_col] = old_df[id_col].astype(str)
     new_df[id_col] = new_df[id_col].astype(str)
     
@@ -184,7 +131,7 @@ def identify_changes(old_df, new_df):
 def main():
     print("Starting Alberta Lobbyist Registry Scraper...")
     
-    diagnostic_holder = {"reason": "Unknown processing mismatch encountered within the data pipeline."}
+    diagnostic_holder = {"reason": "Unknown processing exception encountered inside data pipeline layers."}
     current_df = fetch_registry_data(diagnostic_holder)
     
     if current_df is None or current_df.empty:
@@ -228,7 +175,7 @@ def main():
             print(f"  -> Record ID {change['id']} changed: {change['changes']}")
             
     else:
-        print("\nNo tracking data found or baseline file was blank. Establishing fresh master baseline tracking file...")
+        print("\nNo functional tracking baseline detected. Establishing fresh master baseline tracking file...")
         
     current_df.to_csv(DATA_FILE, index=False)
     print(f"\nMaster baseline successfully populated and updated inside '{DATA_FILE}'.")
