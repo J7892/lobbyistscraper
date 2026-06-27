@@ -10,84 +10,86 @@ BASE_URL = "https://albertalobbyistregistry.ca/"
 
 def fetch_registry_data(diagnostic_holder):
     with sync_playwright() as p:
+        # Standardize the browser environment
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         
         try:
             print(f"Navigating to {BASE_URL}...")
-            page.goto(BASE_URL, wait_until="networkidle")
+            page.goto(BASE_URL, wait_until="domcontentloaded")
             
-            print("Clicking into the 'Search Registry' portal via explicit APEX link...")
-            # Use force=True to ensure the click registers even if hidden inside a responsive menu wrapper
-            page.locator("a[href*='SRCH_REG']").first.click(force=True)
+            print("Looking for the 'Search Registry' portal link...")
+            # Click the actual navigation link
+            registry_link = page.locator("a", has_text="Search Registry").first
+            registry_link.click()
             
-            print("Locking execution until the browser confirms arrival at the Search page...")
-            page.wait_for_url("**/*SRCH_REG*", timeout=30000)
-            page.wait_for_load_state("networkidle")
+            print("Waiting for the Search Portal to render...")
+            # Give the APEX framework 10 seconds to naturally load the interface
+            page.wait_for_timeout(10000)
             
-            print("Checking if the APEX framework auto-loaded the initial registry rows...")
-            # Passively watch the DOM for up to 15 seconds to see if the table builds itself
-            table_loaded = False
-            for _ in range(15):
-                row_count = page.evaluate("""() => {
-                    const tables = Array.from(document.querySelectorAll('table'));
-                    let maxRows = 0;
-                    tables.forEach(t => {
-                        const rows = t.querySelectorAll('tr').length;
-                        if (rows > maxRows) maxRows = rows;
-                    });
-                    return maxRows;
-                }""")
-                
-                if row_count >= 5:
-                    table_loaded = True
-                    break
-                page.wait_for_timeout(1000)
-                
-            if not table_loaded:
-                print("Grid did not auto-load. Firing the native search trigger...")
-                page.evaluate("""() => {
-                    const btn = document.getElementById('Search');
-                    if (btn) btn.click();
-                }""")
-                print("Waiting 15 seconds for the database engine to generate rows...")
-                page.wait_for_timeout(15000)
+            # Many APEX registries auto-populate the first 15 rows immediately. 
+            # We will passively check if the table is already on the screen before we touch any buttons.
+            table_found = page.evaluate("""() => {
+                const tables = Array.from(document.querySelectorAll('table'));
+                return tables.some(t => t.querySelectorAll('tr').length > 5);
+            }""")
+            
+            if not table_found:
+                print("Grid did not auto-load. Attempting to click the visual Search button...")
+                # If no table is present, gently click the visual search button
+                search_btn = page.locator("span.ui-btn-text:has-text('Search'), button:has-text('Search'), input[value='Search']").first
+                if search_btn.is_visible():
+                    search_btn.click()
+                    print("Search triggered. Waiting 15 seconds for data to arrive...")
+                    page.wait_for_timeout(15000)
+                else:
+                    print("No explicit Search button visible. Proceeding to extraction scan...")
             else:
-                print("Data grid naturally detected on screen! Allowing 2 seconds for final text rendering...")
-                page.wait_for_timeout(2000)
+                print("Data grid naturally detected on screen!")
                 
         except Exception as e:
-            msg = f"Browser automation navigation or interaction failed: {str(e)}"
+            msg = f"Browser automation navigation failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
-            page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
-        # Capture screen state for artifact tracking
-        page.screenshot(path="debug_screenshot.png", full_page=True)
-        
-        print("Harvesting the largest data matrix from the page DOM...")
+        print("Harvesting the structural data matrix from the page DOM...")
         matrix = page.evaluate("""() => {
             let bestMatrix = [];
-            const tables = Array.from(document.querySelectorAll('table'));
             
+            // Extract standard APEX tables
+            const tables = Array.from(document.querySelectorAll('table'));
             for (let table of tables) {
                 const rows = Array.from(table.querySelectorAll('tr'));
-                // Map the table into a clean text matrix
                 let currentMatrix = rows.map(tr => {
                     return Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.replace(/\\n/g, ' ').trim() : '');
-                }).filter(row => row.some(cell => cell.length > 0)); // Drop entirely empty spacer rows
+                }).filter(row => row.some(cell => cell.length > 0)); // Remove empty spacer rows
                 
-                // Automatically keep the table that contains the most structural data
                 if (currentMatrix.length > bestMatrix.length) {
                     bestMatrix = currentMatrix;
                 }
             }
+            
+            // Fallback for APEX mobile card lists if tables are suppressed
+            if (bestMatrix.length < 2) {
+                const cards = Array.from(document.querySelectorAll('.report-data, .ui-listview li, ul.a-IRR-list li'));
+                let listMatrix = [];
+                for (let c of cards) {
+                    let txt = c.innerText ? c.innerText.trim() : '';
+                    if ((txt.includes('Filing Date') || txt.includes('Registration')) && !txt.includes('FILING AN INITIAL RETURN')) {
+                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                        if (lines.length >= 3) {
+                            listMatrix.push(lines);
+                        }
+                    }
+                }
+                if (listMatrix.length > 1) {
+                    bestMatrix = listMatrix;
+                }
+            }
+            
             return bestMatrix.length > 0 ? bestMatrix : null;
         }""")
         
