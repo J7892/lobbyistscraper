@@ -21,28 +21,17 @@ def fetch_registry_data(diagnostic_holder):
             print(f"Navigating to {BASE_URL}...")
             page.goto(BASE_URL, wait_until="networkidle")
             
-            print("Clicking into the 'Search Registry' portal...")
-            page.locator("text=Search Registry").first.click()
+            # --- THE SMOKING GUN FIX: Anchor Navigation ---
+            print("Clicking into the 'Search Registry' portal via strict URL href...")
+            # We target the actual link destination instead of the visual text to bypass menu headers
+            page.locator("a[href*='SRCH_REG']").first.click()
             
-            print("Waiting for the Search Portal page context to initialize...")
-            page.wait_for_selector("input#Search", timeout=30000)
+            print("Locking execution until the browser confirms arrival at the Search page...")
+            page.wait_for_url("**/*SRCH_REG*", timeout=25000)
             page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(3000)  # Buffer to allow framework listeners to attach
             
-            # --- CRITICAL FIX: Click the jQuery Mobile wrapper natively via JavaScript ---
-            print("Executing search query by targeting the UI wrapper natively...")
-            page.evaluate("""() => {
-                const btn = document.getElementById('Search');
-                if (btn) {
-                    // Find the visual styling wrapper that actually listens for the click
-                    const wrapper = btn.closest('.ui-btn');
-                    if (wrapper) {
-                        wrapper.click();
-                    } else {
-                        btn.click();
-                    }
-                }
-            }""")
+            print("We are confirmed on the Search page. Clicking the database 'Search' button...")
+            page.locator("input#Search, button:has-text('Search')").first.click()
             
             print("Waiting 15 seconds for the backend database engine to generate rows...")
             page.wait_for_timeout(15000)
@@ -75,13 +64,12 @@ def fetch_registry_data(diagnostic_holder):
                 }
             }
 
-            // Strategy 2: Look for jQuery Mobile listviews or APEX cards
+            // Strategy 2: Look for APEX mobile cards or list views if tables are hidden
             if (records.length < 2) {
-                const listItems = Array.from(document.querySelectorAll('.ui-listview li, .a-IRR-tableContainer li, .report-data, div[data-role="collapsible"]'));
+                const listItems = Array.from(document.querySelectorAll('.ui-listview li, .a-IRR-tableContainer li, .report-data'));
                 let listMatrix = [];
                 listItems.forEach(item => {
                     let txt = item.innerText ? item.innerText.trim() : '';
-                    // Exclude sidebar navigation links and identify data cards
                     if ((txt.includes('Filing Date') || txt.includes('Registration')) && !txt.includes('FILING AN INITIAL RETURN')) {
                         let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
                         if (lines.length >= 3) {
@@ -91,25 +79,6 @@ def fetch_registry_data(diagnostic_holder):
                 });
                 if (listMatrix.length > 1) {
                     records = listMatrix;
-                }
-            }
-
-            // Strategy 3: Aggressive fallback catching any isolated data block
-            if (records.length < 2) {
-                let genericMatrix = [];
-                const allDivs = Array.from(document.querySelectorAll('div'));
-                allDivs.forEach(div => {
-                    let txt = div.innerText ? div.innerText.trim() : '';
-                    if (txt.includes('Registration') && txt.includes('Filing Date') && txt.length < 600 && !txt.includes('FILING AN INITIAL RETURN')) {
-                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
-                        const signature = lines.join('|');
-                        if (lines.length >= 3 && !genericMatrix.some(existing => existing.join('|') === signature)) {
-                            genericMatrix.push(lines);
-                        }
-                    }
-                });
-                if (genericMatrix.length > 0) {
-                    records = genericMatrix;
                 }
             }
 
@@ -129,12 +98,9 @@ def fetch_registry_data(diagnostic_holder):
         
         # Determine the header mapping
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        
-        # Check if the extracted layout was card-based (where the first row is actually data, not a header)
         is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col for col in header_row)
         
         if not is_header:
-            print("Data cards detected. Generating generic column headers to hold unstructured fields...")
             max_len = max(len(r) for r in matrix)
             header_row = [f"FIELD_{i}" for i in range(max_len)]
             data_start_idx = 0
