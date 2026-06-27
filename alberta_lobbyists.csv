@@ -1,2 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"The browser loaded the page, but the structural density query failed to harvest a valid multi-row data grid."
+FAILED,Extraction failed. Page text snapshot:   OEC Alberta Lobbyist Registry Search Registry   Login Home ▼ For Lobbyists ▼ Registry Information ▼ Enforcement ▼ Resources ▼ Recent News Contact Us Search Alberta Lobbyist Registry  The Alberta Lobbyist Registry is an online registration system which lobbyists must use to register their lobbying activities in Alberta in compliance with the Alberta Lobbyists Act. As part of Alberta's commitment 
