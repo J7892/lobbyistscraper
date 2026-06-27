@@ -10,51 +10,66 @@ BASE_URL = "https://albertalobbyistregistry.ca/"
 
 def fetch_registry_data(diagnostic_holder):
     with sync_playwright() as p:
-        # Standardize the browser environment
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        # Re-enforce a strict desktop viewport so the site doesn't load mobile menus
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
         page = context.new_page()
         
         try:
             print(f"Navigating to {BASE_URL}...")
+            # Use domcontentloaded to prevent the scraper from hanging on persistent government network trackers
             page.goto(BASE_URL, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
             
-            print("Looking for the 'Search Registry' portal link...")
-            # Click the actual navigation link
-            registry_link = page.locator("a", has_text="Search Registry").first
-            registry_link.click()
-            
-            print("Waiting for the Search Portal to render...")
-            # Give the APEX framework 10 seconds to naturally load the interface
-            page.wait_for_timeout(10000)
-            
-            # Many APEX registries auto-populate the first 15 rows immediately. 
-            # We will passively check if the table is already on the screen before we touch any buttons.
-            table_found = page.evaluate("""() => {
-                const tables = Array.from(document.querySelectorAll('table'));
-                return tables.some(t => t.querySelectorAll('tr').length > 5);
+            # --- THE IRONCLAD NAVIGATION FIX ---
+            print("Bypassing UI clicks. Extracting direct session URL for Search Portal...")
+            search_portal_url = page.evaluate("""() => {
+                const links = Array.from(document.querySelectorAll('a'));
+                // Find the exact link that points to the internal SRCH_REG portal
+                const target = links.find(a => a.href && a.href.includes('SRCH_REG'));
+                return target ? target.href : null;
             }""")
             
-            if not table_found:
-                print("Grid did not auto-load. Attempting to click the visual Search button...")
-                # If no table is present, gently click the visual search button
-                search_btn = page.locator("span.ui-btn-text:has-text('Search'), button:has-text('Search'), input[value='Search']").first
-                if search_btn.is_visible():
-                    search_btn.click()
-                    print("Search triggered. Waiting 15 seconds for data to arrive...")
-                    page.wait_for_timeout(15000)
-                else:
-                    print("No explicit Search button visible. Proceeding to extraction scan...")
-            else:
-                print("Data grid naturally detected on screen!")
+            if not search_portal_url:
+                diagnostic_holder["reason"] = "CRITICAL: Could not find the Search Registry (SRCH_REG) link on the homepage DOM."
+                browser.close()
+                return None
                 
+            print(f"Direct URL found. Forcing browser navigation to: {search_portal_url}")
+            page.goto(search_portal_url, wait_until="domcontentloaded")
+            
+            print("Confirming arrival on the Search portal...")
+            page.wait_for_selector("input#Search, button:has-text('Search')", timeout=20000)
+            page.wait_for_timeout(3000)  # 3-second buffer to allow framework scripts to bind completely
+            
+            print("Commanding the native APEX engine to execute the database search...")
+            # Bypassing the hidden visual UI elements to execute the core backend command
+            page.evaluate("""() => {
+                if (typeof apex !== 'undefined' && apex.submit) {
+                    apex.submit('SEARCH');
+                } else {
+                    const btn = document.getElementById('Search');
+                    if (btn) btn.click();
+                }
+            }""")
+            
+            print("Waiting 15 seconds for the backend database engine to generate rows...")
+            page.wait_for_timeout(15000)
+            
         except Exception as e:
-            msg = f"Browser automation navigation failed: {str(e)}"
+            msg = f"Browser automation navigation or interaction failed: {str(e)}"
             print(msg)
             diagnostic_holder["reason"] = msg
+            page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
             
+        # Capture screen state for artifact tracking
+        page.screenshot(path="debug_screenshot.png", full_page=True)
+        
         print("Harvesting the structural data matrix from the page DOM...")
         matrix = page.evaluate("""() => {
             let bestMatrix = [];
@@ -96,7 +111,7 @@ def fetch_registry_data(diagnostic_holder):
         if not matrix or len(matrix) < 2:
             body_text = page.locator("body").inner_text()
             safe_text = body_text[:400].replace('\n', ' ') if body_text else 'No visible body text'
-            diagnostic_holder["reason"] = f"Extraction failed. Page text snapshot: {safe_text}"
+            diagnostic_holder["reason"] = f"Extraction failed on search page. Page text snapshot: {safe_text}"
             browser.close()
             return None
             
