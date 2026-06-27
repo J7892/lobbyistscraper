@@ -27,14 +27,25 @@ def fetch_registry_data(diagnostic_holder):
             print("Waiting for the Search Portal page context to initialize...")
             page.wait_for_selector("input#Search", timeout=30000)
             page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(3000)  # 3-second buffer to let framework scripts bind completely
+            page.wait_for_timeout(3000)  # Buffer to allow framework listeners to attach
             
-            # --- CRITICAL FIX: Bypass actionability checks to strike the hidden element natively ---
-            print("Executing search query submission via forced interaction...")
-            page.locator("input#Search").click(force=True)
+            # --- CRITICAL FIX: Click the jQuery Mobile wrapper natively via JavaScript ---
+            print("Executing search query by targeting the UI wrapper natively...")
+            page.evaluate("""() => {
+                const btn = document.getElementById('Search');
+                if (btn) {
+                    // Find the visual styling wrapper that actually listens for the click
+                    const wrapper = btn.closest('.ui-btn');
+                    if (wrapper) {
+                        wrapper.click();
+                    } else {
+                        btn.click();
+                    }
+                }
+            }""")
             
-            print("Waiting 20 seconds for the backend database engine to generate rows...")
-            page.wait_for_timeout(20000)
+            print("Waiting 15 seconds for the backend database engine to generate rows...")
+            page.wait_for_timeout(15000)
             
         except Exception as e:
             msg = f"Browser automation navigation or interaction failed: {str(e)}"
@@ -47,51 +58,93 @@ def fetch_registry_data(diagnostic_holder):
         # Capture screen state for artifact tracking
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        print("Harvesting highest density text matrix from the page DOM...")
+        print("Harvesting all structural and list-based data matrices from the page DOM...")
         matrix = page.evaluate("""() => {
+            let records = [];
+
+            // Strategy 1: Look for standard tabular report layouts
             const tables = Array.from(document.querySelectorAll('table'));
-            if (tables.length === 0) return null;
-            
-            // Map every table element to a structured string array matrix
-            const matrices = tables.map(table => {
+            for (let table of tables) {
                 const rows = Array.from(table.querySelectorAll('tr'));
-                return rows.map(tr => 
-                    Array.from(tr.querySelectorAll('th, td')).map(cell => cell.innerText ? cell.innerText.trim() : '')
-                ).filter(row => row.length > 0);
-            }).filter(m => m.length > 0);
-            
-            if (matrices.length === 0) return null;
-            
-            // Automatically isolate the table holding the largest total cell grid area
-            let bestMatrix = matrices[0];
-            let maxCells = 0;
-            
-            for (const m of matrices) {
-                const totalCells = m.length * (m[0] ? m[0].length : 0);
-                if (totalCells > maxCells) {
-                    maxCells = totalCells;
-                    bestMatrix = m;
+                if (rows.length >= 2) {
+                    let matrix = rows.map(tr => Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
+                    // Ensure the matrix has actual data columns
+                    if (matrix[0].length >= 3 && matrix.length > records.length) {
+                        records = matrix;
+                    }
                 }
             }
-            
-            return bestMatrix;
+
+            // Strategy 2: Look for jQuery Mobile listviews or APEX cards
+            if (records.length < 2) {
+                const listItems = Array.from(document.querySelectorAll('.ui-listview li, .a-IRR-tableContainer li, .report-data, div[data-role="collapsible"]'));
+                let listMatrix = [];
+                listItems.forEach(item => {
+                    let txt = item.innerText ? item.innerText.trim() : '';
+                    // Exclude sidebar navigation links and identify data cards
+                    if ((txt.includes('Filing Date') || txt.includes('Registration')) && !txt.includes('FILING AN INITIAL RETURN')) {
+                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                        if (lines.length >= 3) {
+                            listMatrix.push(lines);
+                        }
+                    }
+                });
+                if (listMatrix.length > 1) {
+                    records = listMatrix;
+                }
+            }
+
+            // Strategy 3: Aggressive fallback catching any isolated data block
+            if (records.length < 2) {
+                let genericMatrix = [];
+                const allDivs = Array.from(document.querySelectorAll('div'));
+                allDivs.forEach(div => {
+                    let txt = div.innerText ? div.innerText.trim() : '';
+                    if (txt.includes('Registration') && txt.includes('Filing Date') && txt.length < 600 && !txt.includes('FILING AN INITIAL RETURN')) {
+                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                        const signature = lines.join('|');
+                        if (lines.length >= 3 && !genericMatrix.some(existing => existing.join('|') === signature)) {
+                            genericMatrix.push(lines);
+                        }
+                    }
+                });
+                if (genericMatrix.length > 0) {
+                    records = genericMatrix;
+                }
+            }
+
+            return records.length > 0 ? records : null;
         }""")
         
-        browser.close()
-        
         if not matrix or len(matrix) < 2:
-            diagnostic_holder["reason"] = "The browser loaded the page, but the structural density query failed to harvest a valid multi-row data grid."
+            body_text = page.locator("body").inner_text()
+            safe_text = body_text[:400].replace('\n', ' ') if body_text else 'No visible body text'
+            diagnostic_holder["reason"] = f"Extraction failed. Page text snapshot: {safe_text}"
+            browser.close()
             return None
+            
+        browser.close()
             
         print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
         
-        # Standardize and clean header rows uniformly from the first element layout
+        # Determine the header mapping
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
         
+        # Check if the extracted layout was card-based (where the first row is actually data, not a header)
+        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col for col in header_row)
+        
+        if not is_header:
+            print("Data cards detected. Generating generic column headers to hold unstructured fields...")
+            max_len = max(len(r) for r in matrix)
+            header_row = [f"FIELD_{i}" for i in range(max_len)]
+            data_start_idx = 0
+        else:
+            header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
+            data_start_idx = 1
+            
         cleaned_rows = []
-        for row in matrix[1:]:
-            if not any(row):  # Skip completely empty trailing lines
+        for row in matrix[data_start_idx:]:
+            if not any(row):  
                 continue
             if len(row) == len(header_row):
                 cleaned_rows.append(row)
@@ -100,17 +153,17 @@ def fetch_registry_data(diagnostic_holder):
             else:
                 cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
                 
-        # Build the DataFrame straight from our pristine text array matrix
+        # Build the final DataFrame
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
-        # Drop non-analytical operational columns if they populate
-        if 'VIEW' in data_table.columns:
-            data_table = data_table.drop(columns=['VIEW'])
+        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
+        if cols_to_drop:
+            data_table = data_table.drop(columns=cols_to_drop)
             
         return data_table
 
 def identify_changes(old_df, new_df):
-    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
+    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
     id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
     print(f"Tracking registry entries using identifier column: '{id_col}'")
