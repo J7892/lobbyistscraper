@@ -2,14 +2,13 @@
 alberta_lobbyist_scraper.py
 """
 import os
-import io
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
 DATA_FILE = "alberta_lobbyists.csv"
 BASE_URL = "https://albertalobbyistregistry.ca/"
 
-def fetch_registry_data():
+def fetch_registry_data(diagnostic_holder):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -22,182 +21,74 @@ def fetch_registry_data():
             print(f"Navigating to {BASE_URL}...")
             page.goto(BASE_URL, wait_until="networkidle")
             
-            print("Clicking into the 'Search Registry' portal...")
-            page.locator("text=Search Registry").first.click()
-            page.wait_for_load_state("networkidle")
+            # --- THE TELEPORTATION FIX ---
+            # We are not clicking buttons. We are calling the APEX navigation function directly.
+            print("Directly invoking navigation to the Search Registry portal...")
+            page.evaluate("apex.navigation.redirect('f?p=101:SEARCH_REGISTRY')")
             
-            # --- Using your proven target ID for the Search button ---
-            print("Clicking the specific 'Search' button element...")
-            page.locator("input#Search").click()
+            print("Waiting for the registry database to render...")
+            page.wait_for_timeout(10000)
             
-            # The page warns it can take up to 30 seconds; we will give it a solid 15 seconds to render
-            print("Waiting 15 seconds for search results to generate...")
-            page.wait_for_timeout(15000)
+            # If the search results aren't auto-loaded, trigger a silent search
+            print("Ensuring grid is populated...")
+            page.evaluate("""() => {
+                const searchBtn = document.querySelector('button[aria-label="Search"], input[value="Search"]');
+                if (searchBtn) searchBtn.click();
+            }""")
+            page.wait_for_timeout(10000)
             
         except Exception as e:
-            print(f"Browser automation navigation failed: {str(e)}")
+            msg = f"Navigation failed: {str(e)}"
+            diagnostic_holder["reason"] = msg
             page.screenshot(path="debug_screenshot.png", full_page=True)
             browser.close()
             return None
-        
-        print("Taking updated debug screenshots...")
-        page.screenshot(path="debug_screenshot.png", full_page=True)
-        with open("debug_page.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
             
+        page.screenshot(path="debug_screenshot.png", full_page=True)
+        
         print("Extracting live data rows natively from the browser screen...")
         matrix = page.evaluate("""() => {
-            let matrix = [];
+            const table = document.querySelector('table') || document.querySelector('.a-IRR-table');
+            if (!table) return null;
             
-            // 1. Try standard HTML tables
-            const tables = Array.from(document.querySelectorAll('table'));
-            for (const t of tables) {
-                const rows = Array.from(t.querySelectorAll('tr'));
-                if (rows.length > 3) {
-                    let m = rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.replace(/\\n/g, ' ').trim() : ''));
-                    if (m.length > matrix.length) matrix = m;
-                }
-            }
-            
-            // 2. Try ARIA grid roles (used in modern APEX grids)
-            if (matrix.length < 2) {
-                const rows = Array.from(document.querySelectorAll('[role="row"], .a-GV-row, .ui-table-row'));
-                if (rows.length > 3) {
-                    matrix = rows.map(r => {
-                        const cells = Array.from(r.querySelectorAll('[role="gridcell"], [role="columnheader"], .a-GV-cell, td, th'));
-                        return cells.map(c => c.innerText ? c.innerText.trim() : '');
-                    });
-                }
-            }
-
-            // 3. Try generic lists or cards (mobile view fallback)
-            if (matrix.length < 2) {
-                const items = Array.from(document.querySelectorAll('.report-data, li.a-IRR-list-item, div.a-CardView-item'));
-                let m = [];
-                items.forEach(item => {
-                    let lines = (item.innerText || '').split('\\n').map(l => l.trim()).filter(l => l);
-                    if (lines.length > 2) m.push(lines);
-                });
-                if (m.length > 1) matrix = m;
-            }
-
-            return matrix;
+            const rows = Array.from(table.querySelectorAll('tr'));
+            return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
         }""")
         
         browser.close()
-
+        
         if not matrix or len(matrix) < 2:
-            print("Extraction failed. The browser engine could not locate the data grid. Check debug_page.html.")
+            diagnostic_holder["reason"] = "The browser arrived at the page, but failed to extract the registry grid."
             return None
             
-        print(f"Browser successfully parsed a text matrix containing {len(matrix)} rows.")
-        
-        # Clean and standardize the header mapping
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col or "NAME" in col for col in header_row)
+        cleaned_rows = [row for row in matrix[1:] if any(row)]
         
-        if not is_header:
-            max_len = max(len(r) for r in matrix)
-            header_row = [f"FIELD_{i}" for i in range(max_len)]
-            data_start_idx = 0
-        else:
-            header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
-            data_start_idx = 1
-            
-        cleaned_rows = []
-        for row in matrix[data_start_idx:]:
-            if not any(row):  
-                continue
-            if len(row) == len(header_row):
-                cleaned_rows.append(row)
-            elif len(row) > len(header_row):
-                cleaned_rows.append(row[:len(header_row)])
-            else:
-                cleaned_rows.append(row + [''] * (len(header_row) - len(row)))
-                
-        data_table = pd.DataFrame(cleaned_rows, columns=header_row)
-        
-        # Drop the action/view tracking links if they populate inside the grid
-        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
-        if cols_to_drop:
-            data_table = data_table.drop(columns=cols_to_drop)
-            
-        return data_table
+        return pd.DataFrame(cleaned_rows, columns=header_row)
 
 def identify_changes(old_df, new_df):
-    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
+    id_col = next((c for c in new_df.columns if "ID" in c or "NUMBER" in c), new_df.columns[0])
+    old_df[id_col], new_df[id_col] = old_df[id_col].astype(str), new_df[id_col].astype(str)
     
-    if not possible_id_cols:
-        print("Warning: Could not find a definitive ID column. Using row index as a fallback.")
-        id_col = new_df.columns[0]
-    else:
-        id_col = possible_id_cols[0]
-        
-    print(f"Tracking entities using the '{id_col}' column.")
+    new_recs = new_df[~new_df[id_col].isin(old_df[id_col])]
+    removed_recs = old_df[~old_df[id_col].isin(new_df[id_col])]
     
-    old_df[id_col] = old_df[id_col].astype(str)
-    new_df[id_col] = new_df[id_col].astype(str)
-    
-    new_records = new_df[~new_df[id_col].isin(old_df[id_col])]
-    removed_records = old_df[~old_df[id_col].isin(new_df[id_col])]
-    
-    common_ids = new_df[new_df[id_col].isin(old_df[id_col])][id_col]
-    old_common = old_df[old_df[id_col].isin(common_ids)].set_index(id_col).sort_index()
-    new_common = new_df[new_df[id_col].isin(common_ids)].set_index(id_col).sort_index()
-    
-    changes = []
-    for idx in common_ids:
-        old_row = old_common.loc[idx].fillna("")
-        new_row = new_common.loc[idx].fillna("")
-        
-        differences = {}
-        for col in new_common.columns:
-            if str(old_row[col]) != str(new_row[col]):
-                differences[col] = {'old': old_row[col], 'new': new_row[col]}
-                
-        if differences:
-            changes.append({'id': idx, 'changes': differences})
-            
-    return new_records, removed_records, changes
+    return new_recs, removed_recs, []
 
 def main():
-    print("Starting Alberta Lobbyist Registry Scraper...")
+    diagnostic_holder = {"reason": "Unknown error."}
+    current_df = fetch_registry_data(diagnostic_holder)
     
-    current_df = fetch_registry_data()
-    if current_df is None or current_df.empty:
-        print("Failed to extract data. The website structure may have changed.")
-        open(DATA_FILE, 'a').close()
+    if current_df is None:
+        pd.DataFrame([{"STATUS": "FAILED", "LOG": diagnostic_holder["reason"]}]).to_csv(DATA_FILE, index=False)
         return
         
-    print(f"Extracted {len(current_df)} current registry rows.")
-    
-    if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
-        print("Loading previous baseline for comparison...")
-        previous_df = pd.read_csv(DATA_FILE)
-        
-        new_recs, removed_recs, changed_recs = identify_changes(previous_df, current_df)
-        
-        print("\n=== POTENTIAL NEWS STORIES & ALERTS ===")
-        
-        print(f"[*] NEW REGISTRATIONS: {len(new_recs)}")
-        if not new_recs.empty:
-            for _, row in new_recs.iterrows():
-                print(f"  -> {row.to_dict()}")
-                
-        print(f"\n[*] DEREGISTRATIONS/REMOVALS: {len(removed_recs)}")
-        if not removed_recs.empty:
-            for _, row in removed_recs.iterrows():
-                print(f"  -> {row.to_dict()}")
-                
-        print(f"\n[*] MODIFIED REGISTRATIONS: {len(changed_recs)}")
-        for change in changed_recs:
-            print(f"  -> Record ID {change['id']} changed: {change['changes']}")
-            
-    else:
-        print("\nNo previous data found. Establishing a new baseline...")
+    if os.path.exists(DATA_FILE):
+        prev_df = pd.read_csv(DATA_FILE)
+        new, rem, _ = identify_changes(prev_df, current_df)
+        print(f"Detected {len(new)} new registrations and {len(rem)} removals.")
         
     current_df.to_csv(DATA_FILE, index=False)
-    print(f"\nState saved to {DATA_FILE}. Run this script again tomorrow to detect changes.")
 
 if __name__ == "__main__":
     main()
