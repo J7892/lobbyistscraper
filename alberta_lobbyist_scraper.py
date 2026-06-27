@@ -18,7 +18,7 @@ def fetch_registry_data(diagnostic_holder):
         page = context.new_page()
         
         try:
-            # --- Using your exact working navigation sequence ---
+            # --- Utilizing your proven, working navigation sequence ---
             print(f"Navigating to {BASE_URL}...")
             page.goto(BASE_URL, wait_until="networkidle")
             
@@ -27,7 +27,8 @@ def fetch_registry_data(diagnostic_holder):
             page.wait_for_load_state("networkidle")
             
             print("Clicking the specific 'Search' button element...")
-            page.locator("input#Search").click()
+            # Added a fallback selector and force=True to ensure the click punches through mobile wrappers
+            page.locator("input#Search, span.ui-btn-text:has-text('Search')").first.click(force=True)
             
             print("Waiting 15 seconds for search results to generate...")
             page.wait_for_timeout(15000)
@@ -43,44 +44,74 @@ def fetch_registry_data(diagnostic_holder):
         # Take an updated debug screenshot for verification
         page.screenshot(path="debug_screenshot.png", full_page=True)
         
-        print("Extracting live table rows natively from the browser screen...")
+        print("Extracting live data rows natively from the browser screen...")
         matrix = page.evaluate("""() => {
-            // Find all tables loaded on the page
+            let records = [];
+            
+            // Strategy 1: Look for traditional HTML tables
             const tables = Array.from(document.querySelectorAll('table'));
-            if (tables.length === 0) return null;
-            
-            // Isolate the table that contains actual data headers
-            let targetTable = tables.find(t => t.innerText && t.innerText.toLowerCase().includes('filing date'));
-            
-            // Fallback: If strict word matching fails, grab the largest structural table visible
-            if (!targetTable) {
-                targetTable = tables.reduce((max, t) => {
-                    const rows = t.querySelectorAll('tr').length;
-                    return rows > max.rows ? {table: t, rows: rows} : max;
-                }, {table: null, rows: 0}).table;
+            for (let table of tables) {
+                const rows = Array.from(table.querySelectorAll('tr'));
+                if (rows.length >= 2) {
+                    let extracted = rows.map(tr => 
+                        Array.from(tr.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.replace(/\\n/g, ' ').trim() : '')
+                    );
+                    if (extracted[0].length >= 3 && extracted.length > records.length) {
+                        records = extracted;
+                    }
+                }
             }
             
-            if (!targetTable) return null;
+            // Strategy 2: Look for mobile/responsive list views (jQuery Mobile / APEX Cards)
+            if (records.length < 2) {
+                const listItems = Array.from(document.querySelectorAll('.ui-listview li, .a-IRR-tableContainer li, .report-data, .a-CardView-item, div[data-role="collapsible"]'));
+                let listMatrix = [];
+                for (let item of listItems) {
+                    let txt = item.innerText ? item.innerText.trim() : '';
+                    // Identify blocks of text that belong to a registration entry
+                    if ((txt.includes('Filing Date') || txt.includes('Registration')) && !txt.includes('FILING AN INITIAL RETURN')) {
+                        let lines = txt.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
+                        if (lines.length >= 3) {
+                            listMatrix.push(lines);
+                        }
+                    }
+                }
+                if (listMatrix.length > 1) {
+                    records = listMatrix;
+                }
+            }
             
-            const rows = Array.from(targetTable.querySelectorAll('tr'));
-            return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText ? c.innerText.trim() : ''));
+            return records.length > 0 ? records : null;
         }""")
         
-        browser.close()
-        
+        # If extraction completely fails, capture the exact text on screen for debugging
         if not matrix or len(matrix) < 2:
-            diagnostic_holder["reason"] = "The page loaded, but the browser engine failed to isolate rows inside the workspace grid container."
+            body_text = page.locator("body").inner_text()
+            safe_text = body_text[:400].replace('\n', ' ') if body_text else 'No visible body text'
+            diagnostic_holder["reason"] = f"Extraction failed. Page text snapshot: {safe_text}"
+            browser.close()
             return None
             
-        print(f"Browser successfully parsed a text matrix containing {len(matrix)} rows.")
+        browser.close()
+            
+        print(f"Browser successfully extracted a data matrix containing {len(matrix)} rows.")
         
-        # Clean and standardize the header titles
+        # Clean and standardize the header mapping
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
+        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col or "NAME" in col for col in header_row)
         
+        # Accommodate unstructured card formats where the first row is data, not headers
+        if not is_header:
+            max_len = max(len(r) for r in matrix)
+            header_row = [f"FIELD_{i}" for i in range(max_len)]
+            data_start_idx = 0
+        else:
+            header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
+            data_start_idx = 1
+            
         cleaned_rows = []
-        for row in matrix[1:]:
-            if not any(row):  # Skip empty whitespace lines
+        for row in matrix[data_start_idx:]:
+            if not any(row):  
                 continue
             if len(row) == len(header_row):
                 cleaned_rows.append(row)
@@ -99,7 +130,7 @@ def fetch_registry_data(diagnostic_holder):
         return data_table
 
 def identify_changes(old_df, new_df):
-    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col]
+    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
     id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
     print(f"Tracking registry records using identifier column: '{id_col}'")
