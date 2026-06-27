@@ -1,5 +1,2 @@
 SCRAPER_STATUS,DIAGNOSTIC_LOG
-FAILED,"Browser automation navigation or interaction failed: Page.goto: net::ERR_ABORTED at javascript:pagescms_navigate('ABLBY','SRCH_REG');
-Call log:
-  - navigating to ""javascript:pagescms_navigate('ABLBY','SRCH_REG');"", waiting until ""domcontentloaded""
-"
+FAILED,"The page loaded, but the browser engine failed to isolate rows inside the workspace grid container."
