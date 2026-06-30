@@ -5,7 +5,7 @@ import os
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-# Force absolute pathing to guarantee GitHub Actions always finds the artifacts
+# Absolute pathing guarantees GitHub Actions consistently maps artifacts
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(CURRENT_DIR, "alberta_lobbyists.csv")
 SCREENSHOT_FILE = os.path.join(CURRENT_DIR, "debug_screenshot.png")
@@ -22,7 +22,7 @@ def fetch_registry_data(diagnostic_holder):
         page = context.new_page()
         
         try:
-            # --- Reverting exactly to your proven, working navigation sequence ---
+            # --- Your proven navigation sequence ---
             print(f"Navigating to {BASE_URL}...")
             page.goto(BASE_URL, wait_until="networkidle")
             
@@ -33,7 +33,7 @@ def fetch_registry_data(diagnostic_holder):
             print("Clicking the specific 'Search' button element...")
             page.locator("input#Search").click()
             
-            print("Waiting 15 seconds for search results to generate...")
+            print("Waiting 15 seconds for search results to generate inside frame wrappers...")
             page.wait_for_timeout(15000)
             
         except Exception as e:
@@ -41,7 +41,6 @@ def fetch_registry_data(diagnostic_holder):
             print(msg)
             diagnostic_holder["reason"] = msg
             
-            # Bulletproof emergency capture: write artifacts even during execution failures
             try:
                 page.screenshot(path=SCREENSHOT_FILE, full_page=True)
                 with open(HTML_FILE, "w", encoding="utf-8") as f:
@@ -51,64 +50,79 @@ def fetch_registry_data(diagnostic_holder):
             browser.close()
             return None
             
-        # Standard artifact capture for successful navigation passes
+        # Capture artifacts securely before starting data parsing sweeps
         try:
             page.screenshot(path=SCREENSHOT_FILE, full_page=True)
             with open(HTML_FILE, "w", encoding="utf-8") as f:
                 f.write(page.content())
-            print("Debug artifacts successfully committed to absolute workspace directories.")
+            print("Debug artifacts successfully updated.")
         except Exception as ae:
             print(f"Warning: Failed to write debug artifacts: {str(ae)}")
             
-        print("Harvesting structured data rows from the live screen matrix...")
-        matrix = page.evaluate("""() => {
-            const tables = Array.from(document.querySelectorAll('table'));
-            if (tables.length === 0) return null;
-            
-            let bestTable = null;
-            let maxScore = -1;
-            
-            for (const table of tables) {
-                const text = (table.innerText || '').toLowerCase();
-                let score = 0;
+        print("Harvesting structured data rows across all page frame environments...")
+        matrix = None
+        max_rows = 0
+        
+        # Compile a list of all active frame contexts (Main page + any embedded iframes)
+        all_frames = [page.main_frame] + page.child_frames
+        
+        for frame in all_frames:
+            try:
+                # Run the keyword-scored table extractor inside this specific frame context
+                frame_matrix = frame.evaluate("""() => {
+                    const tables = Array.from(document.querySelectorAll('table'));
+                    if (tables.length === 0) return null;
+                    
+                    let bestTable = null;
+                    let maxScore = -1;
+                    
+                    for (const table of tables) {
+                        const text = (table.innerText || '').toLowerCase();
+                        let score = 0;
+                        
+                        if (text.includes('registration')) score += 15;
+                        if (text.includes('filing')) score += 15;
+                        if (text.includes('status')) score += 10;
+                        if (text.includes('lobbyist')) score += 15;
+                        if (text.includes('organization')) score += 10;
+                        
+                        const rows = Array.from(table.querySelectorAll('tr'));
+                        if (rows.length >= 2) {
+                            const sampleCells = rows[0].querySelectorAll('th, td').length;
+                            if (sampleCells >= 4) score += 20;
+                            score += rows.length;
+                        }
+                        
+                        if (score > maxScore && rows.length >= 2) {
+                            maxScore = score;
+                            bestTable = table;
+                        }
+                    }
+                    
+                    if (!bestTable) return null;
+                    
+                    const trs = Array.from(bestTable.querySelectorAll('tr'));
+                    return trs.map(tr => 
+                        Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
+                    ).filter(row => row.length > 0);
+                }""")
                 
-                // Score tables dynamically based on core registry data keywords
-                if (text.includes('registration')) score += 15;
-                if (text.includes('filing')) score += 15;
-                if (text.includes('status')) score += 10;
-                if (text.includes('lobbyist')) score += 15;
-                if (text.includes('organization')) score += 10;
-                
-                const rows = Array.from(table.querySelectorAll('tr'));
-                if (rows.length >= 2) {
-                    const sampleCells = rows[0].querySelectorAll('th, td').length;
-                    if (sampleCells >= 4) score += 20; // Column structural density bonus
-                    score += rows.length; // Row population scale bonus
-                }
-                
-                if (score > maxScore && rows.length >= 2) {
-                    maxScore = score;
-                    bestTable = table;
-                }
-            }
-            
-            if (!bestTable) return null;
-            
-            const trs = Array.from(bestTable.querySelectorAll('tr'));
-            return trs.map(tr => 
-                Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
-            ).filter(row => row.length > 0);
-        }""")
+                if frame_matrix and len(frame_matrix) > max_rows:
+                    max_rows = len(frame_matrix)
+                    matrix = frame_matrix
+            except Exception as fe:
+                print(f"Skipping frame evaluation pass: {str(fe)}")
+                continue
         
         browser.close()
         
         if not matrix or len(matrix) < 2:
-            diagnostic_holder["reason"] = "The browser loaded the screen, but the intelligent keyword matrix parser found zero matching data layouts. Inspect debug_page.html."
+            diagnostic_holder["reason"] = "The browser reached the dashboard, but failed to extract rows from any parent or child iframe contexts."
             return None
             
-        print(f"Browser successfully isolated data matrix containing {len(matrix)} rows.")
+        print(f"Successfully isolated data matrix containing {len(matrix)} rows from active window context.")
         
-        # Clean and map headers
+        # Standardize header rows and construct the DataFrame
         header_row = [str(cell).strip().upper() for cell in matrix[0]]
         is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col or "NAME" in col for col in header_row)
         
@@ -133,7 +147,7 @@ def fetch_registry_data(diagnostic_holder):
                 
         data_table = pd.DataFrame(cleaned_rows, columns=header_row)
         
-        # Drop operational action link text columns if they carry over
+        # Clean out functional link markers or structural action text
         cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
         if cols_to_drop:
             data_table = data_table.drop(columns=cols_to_drop)
@@ -144,7 +158,7 @@ def identify_changes(old_df, new_df):
     possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
     id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
     
-    print(f"Tracking entries using historical key: '{id_col}'")
+    print(f"Tracking registry adjustments using key element: '{id_col}'")
     old_df[id_col] = old_df[id_col].astype(str)
     new_df[id_col] = new_df[id_col].astype(str)
     
@@ -173,7 +187,7 @@ def identify_changes(old_df, new_df):
 def main():
     print("Starting Alberta Lobbyist Registry Scraper...")
     
-    diagnostic_holder = {"reason": "Unknown processing exception encountered inside data pipeline layers."}
+    diagnostic_holder = {"reason": "Unknown processing mismatch encountered within the data pipeline."}
     current_df = fetch_registry_data(diagnostic_holder)
     
     if current_df is None or current_df.empty:
@@ -217,7 +231,7 @@ def main():
             print(f"  -> Record ID {change['id']} changed: {change['changes']}")
             
     else:
-        print("\nNo functional tracking baseline detected. Establishing fresh master baseline tracking file...")
+        print("\nNo tracking history found. Establishing master baseline tracking file...")
         
     current_df.to_csv(DATA_FILE, index=False)
     print(f"\nMaster baseline successfully populated and updated inside '{DATA_FILE}'.")
