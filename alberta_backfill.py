@@ -123,24 +123,25 @@ def backfill_historical_registry():
                     try:
                         # Monitor and intercept the specific async download stream link
                         with context.expect_event("download", timeout=15000) as download_info:
-                            winning_frame.evaluate(f"""(targetIndex) => {{
+                            # FIX: Removed the 'f' prefix here and restored single brackets for native JS execution
+                            winning_frame.evaluate("""(targetIndex) => {
                                 const tables = Array.from(document.querySelectorAll('table'));
                                 let bestTable = tables.find(t => (t.innerText || '').toLowerCase().includes('registration'));
-                                if (!bestTable && tables.length > 0) {{
-                                    bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {{table: t, rows: t.querySelectorAll('tr').length}} : max, {{table: null, rows: 0}}).table;
-                                }}
-                                if (bestTable) {{
+                                if (!bestTable && tables.length > 0) {
+                                    bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {table: t, rows: t.querySelectorAll('tr').length} : max, {table: null, rows: 0}).table;
+                                }
+                                if (bestTable) {
                                     const trs = Array.from(bestTable.querySelectorAll('tr'));
-                                    if (targetIndex < trs.length) {{
+                                    if (targetIndex < trs.length) {
                                         const cells = trs[targetIndex].querySelectorAll('td');
-                                        if (cells.length > 0) {{
+                                        if (cells.length > 0) {
                                             const finalCell = cells[cells.length - 1];
                                             const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
                                             activationNode.click();
-                                        }}
+                                        }
                                     }
-                                }}
-                            }}""", idx)
+                                }
+                            }""", idx)
                             
                         download = download_info.value
                         temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
