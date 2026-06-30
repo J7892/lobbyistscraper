@@ -1,18 +1,82 @@
 """
 alberta_lobbyist_scraper.py
+Daily incremental change analyzer with automated Gmail HTML digest mailing.
 """
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import pandas as pd
 from playwright.sync_api import sync_playwright
+from pypdf import PdfReader
 
-# Absolute pathing guarantees GitHub Actions consistently maps artifacts
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(CURRENT_DIR, "alberta_lobbyists.csv")
-SCREENSHOT_FILE = os.path.join(CURRENT_DIR, "debug_screenshot.png")
-HTML_FILE = os.path.join(CURRENT_DIR, "debug_page.html")
+HISTORICAL_DATA_FILE = os.path.join(CURRENT_DIR, "alberta_lobbyists_historical.csv")
 BASE_URL = "https://albertalobbyistregistry.ca/"
 
-def fetch_registry_data(diagnostic_holder):
+def send_email_digest(html_content, subject_text="Daily Lobbyist Registry Update"):
+    """Connects to Gmail SMTP backbone to transmit the compiled HTML dataset."""
+    username = os.environ.get("SMTP_USERNAME")
+    password = os.environ.get("SMTP_PASSWORD")  # 16-character secure App Password
+    recipient = os.environ.get("NOTIFY_EMAIL")
+    
+    if not all([username, password, recipient]):
+        print("[WARNING] Email credentials missing from GitHub secrets environment. Skipping notification.")
+        return
+
+    # Gmail production SMTP relays configuration mappings
+    smtp_server = "smtp.gmail.com"
+    smtp_port = 587
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject_text
+    msg["From"] = username
+    msg["To"] = recipient
+
+    msg.attach(MIMEText(html_content, "html"))
+
+    try:
+        print(f"Opening secure encrypted transport channel to {smtp_server}...")
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()  # Initialize transport layer security handshake
+            server.login(username, password)
+            server.sendmail(username, recipient, msg.as_string())
+        print(f"Success! Daily update digest sent safely to target address: {recipient}")
+    except Exception as email_fault:
+        print(f"[ERROR] Mail pipeline transmission dropped: {str(email_fault)}")
+
+def extract_pdf_text(pdf_path):
+    """Parses binary disclosure files to unified text layouts."""
+    try:
+        reader = PdfReader(pdf_path)
+        text_accumulator = []
+        for individual_page in reader.pages:
+            content = individual_page.extract_text()
+            if content:
+                text_accumulator.append(content)
+        return " ".join(text_accumulator).replace("\n", " ").strip() if text_accumulator else ""
+    except Exception:
+        return ""
+
+def execute_daily_scrape():
+    print("Initiating incremental lobbyist monitoring check...")
+    
+    # Load your complete backfilled history file
+    if not os.path.exists(HISTORICAL_DATA_FILE):
+        print(f"[FATAL] Reference historical ledger not found at destination: {HISTORICAL_DATA_FILE}")
+        return
+        
+    historical_df = pd.read_csv(HISTORICAL_DATA_FILE)
+    
+    # Track existing registrations via unique registration token keys
+    if "REGISTRATION NUMBER" in historical_df.columns:
+        existing_tokens = set(historical_df["REGISTRATION NUMBER"].astype(str).tolist())
+    else:
+        print("[FATAL] Structural anomalies located in target column headers.")
+        return
+
+    new_records_captured = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -22,298 +86,165 @@ def fetch_registry_data(diagnostic_holder):
         page = context.new_page()
         
         try:
-            # --- Your proven navigation sequence ---
-            print(f"Navigating to {BASE_URL}...")
+            print(f"Navigating to live query baseline: {BASE_URL}")
             page.goto(BASE_URL, wait_until="networkidle")
-            
-            print("Clicking into the 'Search Registry' portal...")
             page.locator("text=Search Registry").first.click()
             page.wait_for_load_state("networkidle")
-            
-            print("Clicking the specific 'Search' button element...")
             page.locator("input#Search").click()
+            page.wait_for_timeout(10000)
             
-            print("Waiting 15 seconds for search results to generate inside frame wrappers...")
-            page.wait_for_timeout(15000)
+            winning_frame = None
+            for frame in page.frames:
+                try:
+                    if frame.evaluate("() => document.querySelectorAll('table').length > 0"):
+                        winning_frame = frame
+                        break
+                except Exception:
+                    continue
             
+            if not winning_frame:
+                print("[ERROR] Table context container frame could not be isolated.")
+                browser.close()
+                return
+
+            # Capture live row matrix data from Page 1 to verify incoming additions
+            matrix = winning_frame.evaluate("""() => {
+                const tables = Array.from(document.querySelectorAll('table'));
+                let bestTable = null; let maxScore = -1;
+                for (const table of tables) {
+                    const text = (table.innerText || '').toLowerCase();
+                    let score = 0;
+                    if (text.includes('registration')) score += 15;
+                    if (text.includes('filing')) score += 15;
+                    const rows = Array.from(table.querySelectorAll('tr'));
+                    if (rows.length >= 2) score += 20 + rows.length;
+                    if (score > maxScore && rows.length >= 2) { maxScore = score; bestTable = table; }
+                }
+                if (!bestTable) return null;
+                return Array.from(bestTable.querySelectorAll('tr')).map(tr => 
+                    Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
+                ).filter(row => row.length > 0);
+            }""")
+            
+            if matrix and len(matrix) > 1:
+                header_row = [str(cell).strip().upper() for cell in matrix[0]]
+                data_start_idx = 1 if any("REGISTRATION" in col for col in header_row) else 0
+                
+                try:
+                    reg_num_idx = header_row.index("REGISTRATION NUMBER")
+                except ValueError:
+                    reg_num_idx = 0
+                    
+                # Evaluate front-page registrations against your 1164-row historical master baseline
+                for idx in range(data_start_idx, len(matrix)):
+                    row_data = matrix[idx]
+                    if not any(row_data) or len(row_data) <= reg_num_idx:
+                        continue
+                        
+                    live_token = str(row_data[reg_num_idx])
+                    
+                    # If this registration number is not found in your baseline, it's a new alert!
+                    if live_token not in existing_tokens:
+                        print(f" -> Frontier Alert: Detected incoming record token: {live_token}")
+                        
+                        pdf_text = "No tracking details extracted from profile disclosure file"
+                        try:
+                            with context.expect_event("download", timeout=6000) as download_info:
+                                winning_frame.evaluate("""(targetIndex) => {
+                                    const tables = Array.from(document.querySelectorAll('table'));
+                                    let bestTable = null; let maxScore = -1;
+                                    for (const table of tables) {
+                                        if ((table.innerText || '').toLowerCase().includes('registration')) {
+                                            bestTable = table; break;
+                                        }
+                                    }
+                                    if (bestTable) {
+                                        const trs = Array.from(bestTable.querySelectorAll('tr'));
+                                        if (targetIndex < trs.length) {
+                                            const cells = trs[targetIndex].querySelectorAll('td');
+                                            if (cells.length > 0) {
+                                                const finalCell = cells[cells.length - 1];
+                                                const node = finalCell.querySelector('a, img') || finalCell;
+                                                node.click();
+                                            }
+                                        }
+                                    }
+                                }""", idx)
+                            
+                            download = download_info.value
+                            temp_path = os.path.join(CURRENT_DIR, f"daily_temp_{live_token}.pdf")
+                            download.save_as(temp_path)
+                            pdf_text = extract_pdf_text(temp_path)
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                        except Exception as click_err:
+                            print(f"      * Could not download details for {live_token}: {str(click_err)}")
+                            
+                        # Align layout structures
+                        base_row_list = list(row_data)
+                        while len(base_row_list) < len(historical_df.columns) - 1:
+                            base_row_list.append("")
+                        base_row_list = base_row_list[:len(historical_df.columns) - 1]
+                        
+                        full_record_entry = base_row_list + [pdf_text]
+                        new_records_captured.append(full_record_entry)
+                        
         except Exception as e:
-            msg = f"Browser automation navigation or interaction failed: {str(e)}"
-            print(msg)
-            diagnostic_holder["reason"] = msg
-            
-            try:
-                page.screenshot(path=SCREENSHOT_FILE, full_page=True)
-                with open(HTML_FILE, "w", encoding="utf-8") as f:
-                    f.write(page.content())
-            except Exception:
-                pass
+            print(f"Daily monitor process error: {str(e)}")
+        finally:
             browser.close()
-            return None
-            
-        # Capture artifacts securely before starting data parsing sweeps
-        try:
-            page.screenshot(path=SCREENSHOT_FILE, full_page=True)
-            with open(HTML_FILE, "w", encoding="utf-8") as f:
-                f.write(page.content())
-            print("Debug artifacts successfully updated.")
-        except Exception as ae:
-            print(f"Warning: Failed to write debug artifacts: {str(ae)}")
-            
-        print("Harvesting structured data rows across all page frame environments...")
-        matrix = None
-        max_rows = 0
-        winning_frame = None
-        all_frames = page.frames
-        
-        for frame in all_frames:
-            try:
-                frame_matrix = frame.evaluate("""() => {
-                    const tables = Array.from(document.querySelectorAll('table'));
-                    if (tables.length === 0) return null;
-                    
-                    let bestTable = null;
-                    let maxScore = -1;
-                    
-                    for (const table of tables) {
-                        const text = (table.innerText || '').toLowerCase();
-                        let score = 0;
-                        
-                        if (text.includes('registration')) score += 15;
-                        if (text.includes('filing')) score += 15;
-                        if (text.includes('status')) score += 10;
-                        if (text.includes('lobbyist')) score += 15;
-                        if (text.includes('organization')) score += 10;
-                        
-                        const rows = Array.from(table.querySelectorAll('tr'));
-                        if (rows.length >= 2) {
-                            const sampleCells = rows[0].querySelectorAll('th, td').length;
-                            if (sampleCells >= 4) score += 20;
-                            score += rows.length;
-                        }
-                        
-                        if (score > maxScore && rows.length >= 2) {
-                            maxScore = score;
-                            bestTable = table;
-                        }
-                    }
-                    
-                    if (!bestTable) return null;
-                    
-                    const trs = Array.from(bestTable.querySelectorAll('tr'));
-                    return trs.map(tr => 
-                        Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
-                    ).filter(row => row.length > 0);
-                }""")
-                
-                if frame_matrix and len(frame_matrix) > max_rows:
-                    max_rows = len(frame_matrix)
-                    matrix = frame_matrix
-                    winning_frame = frame
-            except Exception as fe:
-                print(f"Skipping frame evaluation pass: {str(fe)}")
-                continue
-        
-        if not matrix or len(matrix) < 2 or not winning_frame:
-            diagnostic_holder["reason"] = "The browser reached the dashboard, but failed to extract rows from any frame contexts."
-            browser.close()
-            return None
-            
-        print(f"Successfully isolated data matrix containing {len(matrix)} rows. Beginning inline PDF deep scans...")
-        
-        # Standardize header mapping titles
-        header_row = [str(cell).strip().upper() for cell in matrix[0]]
-        is_header = any("REGISTRATION" in col or "FILING" in col or "STATUS" in col or "NAME" in col for col in header_row)
-        
-        if not is_header:
-            max_len = max(len(r) for r in matrix)
-            header_row = [f"FIELD_{i}" for i in range(max_len)]
-            data_start_idx = 0
-        else:
-            header_row = [col if col else f"COLUMN_{i}" for i, col in enumerate(header_row)]
-            data_start_idx = 1
-            
-        try:
-            reg_num_idx = header_row.index("REGISTRATION NUMBER")
-        except ValueError:
-            reg_num_idx = 0
-            
-        # Append our new analytics deep column header target
-        header_row.append("EXTRACTED_PDF_DETAILS")
-        
-        cleaned_rows = []
-        # Walk row by row through the browser viewport matrix to match clicks synchronously
-        for i in range(data_start_idx, len(matrix)):
-            row = matrix[i]
-            if not any(row):  
-                continue
-                
-            reg_num = row[reg_num_idx] if reg_num_idx < len(row) else f"row_{i}"
-            print(f"[{i}/{len(matrix)-1}] Processing PDF attachment for profile token: {reg_num}")
-            
-            pdf_text = "No additional PDF details extracted"
-            
-            try:
-                # Intercept the target download stream generated by the dynamic click event handler
-                with context.expect_event("download", timeout=12000) as download_info:
-                    # FIX: Dropped the 'f' prefix here to handle clean native JS syntax blocks safely
-                    winning_frame.evaluate("""(rowIndex) => {
-                        const tables = Array.from(document.querySelectorAll('table'));
-                        let bestTable = tables.find(t => (t.innerText || '').toLowerCase().includes('registration'));
-                        if (!bestTable) {
-                            bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {table: t, rows: t.querySelectorAll('tr').length} : max, {table: null, rows: 0}).table;
-                        }
-                        if (bestTable) {
-                            const trs = Array.from(bestTable.querySelectorAll('tr'));
-                            if (rowIndex < trs.length) {
-                                const cells = trs[rowIndex].querySelectorAll('td');
-                                if (cells.length > 0) {
-                                    const lastCell = cells[cells.length - 1];
-                                    const clickTarget = lastCell.querySelector('a, button, img, span') || lastCell;
-                                    clickTarget.click();
-                                }
-                            }
-                        }
-                    }""", i)
-                
-                download = download_info.value
-                pdf_path = os.path.join(CURRENT_DIR, f"pdf_{reg_num}.pdf")
-                download.save_as(pdf_path)
-                
-                # Scan the document file contents natively using pypdf reader components
-                from pypdf import PdfReader
-                reader = PdfReader(pdf_path)
-                extracted_chunks = []
-                for page_obj in reader.pages:
-                    chunk = page_obj.extract_text()
-                    if chunk:
-                        extracted_chunks.append(chunk)
-                        
-                if extracted_chunks:
-                    # Strip breaks and compress down into a clean, single CSV column record item
-                    pdf_text = " ".join(extracted_chunks).replace("\n", " ").strip()
-                    
-                # Garbage collection: safely wipe file to keep repository lightweight
-                if os.path.exists(pdf_path):
-                    os.remove(pdf_path)
-                    
-            except Exception as pe:
-                print(f"  -> Note: PDF extraction skipped or timed out for reference {reg_num}: {str(pe)}")
-                pdf_text = "PDF entry data lookup skipped or document format unreadable"
-                
-            # Append text directly to line array to preserve absolute horizontal cell alignment
-            extended_row = list(row) + [pdf_text]
-            
-            if len(extended_row) == len(header_row):
-                cleaned_rows.append(extended_row)
-            elif len(extended_row) > len(header_row):
-                cleaned_rows.append(extended_row[:len(header_row)])
-            else:
-                cleaned_rows.append(extended_row + [''] * (len(header_row) - len(extended_row)))
-                
-        browser.close()
-        
-        # Construct output tracking DataFrame
-        data_table = pd.DataFrame(cleaned_rows, columns=header_row)
-        
-        # Clean out functional link markers or structural action text
-        cols_to_drop = [col for col in data_table.columns if "COLUMN_" in col or "VIEW" in col]
-        if cols_to_drop:
-            data_table = data_table.drop(columns=cols_to_drop)
-            
-        return data_table
 
-def identify_changes(old_df, new_df):
-    possible_id_cols = [col for col in new_df.columns if "NUMBER" in col or "ID" in col or "REGISTRATION" in col or "FIELD_0" in col]
-    id_col = possible_id_cols[0] if possible_id_cols else new_df.columns[0]
-    
-    print(f"Tracking registry adjustments using key element: '{id_col}'")
-    old_df[id_col] = old_df[id_col].astype(str)
-    new_df[id_col] = new_df[id_col].astype(str)
-    
-    new_records = new_df[~new_df[id_col].isin(old_df[id_col])]
-    removed_records = old_df[~old_df[id_col].isin(new_df[id_col])]
-    
-    common_ids = new_df[new_df[id_col].isin(old_df[id_col])][id_col]
-    old_common = old_df[old_df[id_col].isin(common_ids)].set_index(id_col).sort_index()
-    new_common = new_df[new_df[id_col].isin(common_ids)].set_index(id_col).sort_index()
-    
-    changes = []
-    for idx in common_ids:
-        try:
-            old_row = old_common.loc[idx]
-            new_row = new_common.loc[idx]
-            
-            if isinstance(old_row, pd.DataFrame):
-                old_row = old_row.iloc[0]
-            if isinstance(new_row, pd.DataFrame):
-                new_row = new_row.iloc[0]
-                
-            old_row = old_row.fillna("")
-            new_row = new_row.fillna("")
-            
-            differences = {}
-            for col in new_common.columns:
-                if col in old_row and str(old_row[col]) != str(new_row[col]):
-                    differences[col] = {'old': old_row[col], 'new': new_row[col]}
-                    
-            if differences:
-                changes.append({'id': idx, 'changes': differences})
-        except Exception:
-            continue
-            
-    return new_records, removed_records, changes
-
-def main():
-    print("Starting Alberta Lobbyist Registry Scraper with deep PDF scanning features...")
-    
-    diagnostic_holder = {"reason": "Unknown processing mismatch encountered within the data pipeline."}
-    current_df = fetch_registry_data(diagnostic_holder)
-    
-    if current_df is None or current_df.empty:
-        print("Scraper execution returned zero data rows. Compiling diagnostic tracking report.")
-        diagnostic_df = pd.DataFrame([{
-            "SCRAPER_STATUS": "FAILED", 
-            "DIAGNOSTIC_LOG": diagnostic_holder["reason"]
-        }])
-        diagnostic_df.to_csv(DATA_FILE, index=False)
-        return
+    # --- TRANSMIT NOTIFICATIONS AND COMPILATIONS LAYER ---
+    if new_records_captured:
+        print(f"Processing updates for {len(new_records_captured)} new entries...")
         
-    print(f"Successfully processed {len(current_df)} rows along with corresponding full PDF scans.")
-    
-    is_baseline_valid = False
-    if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
-        try:
-            previous_df = pd.read_csv(DATA_FILE)
-            if not previous_df.empty and "SCRAPER_STATUS" not in previous_df.columns:
-                is_baseline_valid = True
-        except Exception:
-            is_baseline_valid = False
-
-    if is_baseline_valid:
-        print("Loading baseline history for change verification...")
-        previous_df = pd.read_csv(DATA_FILE)
-        new_recs, removed_recs, changed_recs = identify_changes(previous_df, current_df)
-        
-        print("\n=== POTENTIAL NEWS STORIES & ALERTS ===")
-        print(f"[*] NEW REGISTRATIONS: {len(new_recs)}")
-        if not new_recs.empty:
-            for _, row in new_recs.iterrows():
-                print(f"  -> {row.to_dict()}")
-                
-        print(f"\n[*] DEREGISTRATIONS/REMOVALS: {len(removed_recs)}")
-        if not removed_recs.empty:
-            for _, row in removed_recs.iterrows():
-                print(f"  -> {row.to_dict()}")
-                
-        print(f"\n[*] MODIFIED REGISTRATIONS: {len(changed_recs)}")
-        for change in changed_recs:
-            print(f"  -> Record ID {change['id']} changed: {change['changes']}")
+        # Format the structural dictionary array for visual rendering tables
+        visual_data_summary = []
+        for record in new_records_captured:
+            visual_data_summary.append({
+                "Filing Date": record[0] if len(record) > 0 else "N/A",
+                "Organization/Lobbyist": record[2] if len(record) > 2 else "N/A",
+                "Client Name": record[3] if len(record) > 3 else "Direct Filer",
+                "Registration Number": record[8] if len(record) > 8 else "N/A",
+                "Type of Registration": record[11] if len(record) > 11 else "N/A"
+            })
             
+        summary_df = pd.DataFrame(visual_data_summary)
+        html_table = summary_df.to_html(index=False, classes='table-style')
+        
+        email_body = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #333333; }}
+                table {{ border-collapse: collapse; width: 100%; margin-top: 15px; font-size: 13px; }}
+                th {{ background-color: #1a73e8; color: white; padding: 12px; text-align: left; font-weight: 600; }}
+                td {{ border: 1px solid #e0e0e0; padding: 10px; }}
+                tr:nth-child(even) {{ background-color: #f8f9fa; }}
+                .alert-header {{ color: #1a73e8; font-weight: bold; font-size: 20px; border-bottom: 2px solid #1a73e8; padding-bottom: 8px; }}
+            </style>
+        </head>
+        <body>
+            <div class="alert-header">Alberta Lobbyist Registry: New Disclosures Located</div>
+            <p>The daily monitor pipeline isolated the following brand-new filings within the live index:</p>
+            {html_table}
+            <br>
+            <p style="font-size: 11px; color: #888888; border-top: 1px solid #eeeeee; padding-top: 8px;">
+                This is an automated report delivered securely via your automated GitHub Actions infrastructure pipeline.
+            </p>
+        </body>
+        </html>
+        """
+        
+        # Deliver HTML block directly to your inbox via Google's secure channel
+        send_email_digest(email_body, subject_text=f"Alert: {len(new_records_captured)} New Alberta Lobbyist Registrations Detected")
+        
+        # Append the new records back onto your reference file so they aren't marked as modifications tomorrow
+        append_df = pd.DataFrame(new_records_captured, columns=historical_df.columns)
+        append_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
+        print("Master historical tracking database successfully synced and extended.")
     else:
-        print("\nNo tracking history found. Establishing master baseline tracking file...")
-        
-    current_df.to_csv(DATA_FILE, index=False)
-    print(f"\nMaster baseline successfully populated and updated inside '{DATA_FILE}'.")
+        print("No incoming additions identified inside the live registry front view. Database is synchronized.")
 
 if __name__ == "__main__":
-    main()
+    execute_daily_scrape()
