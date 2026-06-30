@@ -1,14 +1,14 @@
-name: Alberta Lobbyist Scraper
+name: Run Lobbyist Scraper
 
 on:
   schedule:
-    # Runs at 08:00 UTC (2:00 AM MST) every day
-    - cron: '0 8 * * *'
-  workflow_dispatch: # Allows you to run it manually from the UI
+    - cron: '0 12 * * *' # Automatically runs every day at 12:00 UTC
+  workflow_dispatch: # Allows you to manually click "Run workflow" inside GitHub Actions
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+
     steps:
     - name: Check out repository
       uses: actions/checkout@v4
@@ -17,29 +17,35 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        cache: 'pip'
 
-    - name: Install dependencies
+    - name: Install Dependencies
       run: |
-        pip install playwright pandas lxml html5lib beautifulsoup4
+        python -m pip install --upgrade pip
+        pip install pandas playwright pypdf
+
+    - name: Install Playwright Chromium Browser
+      run: |
         playwright install chromium
 
-    - name: Run Scraper
-      run: python alberta_lobbyist_scraper.py
+    - name: Run Scraper Script
+      run: |
+        python alberta_lobbyist_scraper.py
 
-    - name: Upload Debug Artifacts
+    - name: Commit and Push Registry Baseline Changes
+      run: |
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "actions@github.com"
+        git add alberta_lobbyists.csv || true
+        git commit -m "Automated Sync: Updated Alberta lobbyist baseline data matrix" || true
+        git push || true
+
+    - name: Upload Diagnostic Debug Artifacts
       uses: actions/upload-artifact@v4
-      if: always() # Ensures this runs even if the scraper step fails
+      if: always() # Forces this step to run even if the scraper crashes, ensuring you always get your diagnostic files
       with:
-        name: debug-files
+        name: registry-debug-logs
         path: |
           debug_screenshot.png
           debug_page.html
-
-    - name: Commit and Push changes
-      run: |
-        git config --global user.name "GitHub Action Scraper"
-        git config --global user.email "actions@github.com"
-        git add alberta_lobbyists.csv || true
-        # Only commit if changes exist to prevent empty workflow failures
-        git diff-index --quiet HEAD || git commit -m "Update registry baseline [skip ci]"
-        git push
+        if-no-files-found: ignore
