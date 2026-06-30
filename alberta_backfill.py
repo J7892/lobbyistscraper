@@ -45,72 +45,71 @@ def backfill_historical_registry():
             
             print("Triggering database initialization search...")
             page.locator("input#Search").click()
-            page.wait_for_timeout(10000)
             
-            # Locate the winning data iframe wrapper context
-            winning_frame = None
-            for frame in page.frames:
-                try:
-                    has_table = frame.evaluate("() => document.querySelectorAll('table').length > 0")
-                    if has_table:
-                        winning_frame = frame
-                        break
-                except Exception:
-                    continue
-                    
-            if not winning_frame:
-                print("Fatal Error: Could not locate the primary database iframe wrapper context.")
-                browser.close()
-                return
-
+            print("Waiting 15 seconds for search results and frames to fully generate...")
+            page.wait_for_timeout(15000)
+            
             # Main sequential pagination loop execution track
             while True:
+                # Dynamically locate the data matrix and frame on every loop cycle
+                matrix = None
+                max_rows = 0
+                winning_frame = None
+                
+                for frame in page.frames:
+                    try:
+                        frame_matrix = frame.evaluate("""() => {
+                            const tables = Array.from(document.querySelectorAll('table'));
+                            if (tables.length === 0) return null;
+                            
+                            let bestTable = null;
+                            let maxScore = -1;
+                            
+                            for (const table of tables) {
+                                const text = (table.innerText || '').toLowerCase();
+                                let score = 0;
+                                
+                                if (text.includes('registration')) score += 15;
+                                if (text.includes('filing')) score += 15;
+                                if (text.includes('status')) score += 10;
+                                if (text.includes('lobbyist')) score += 15;
+                                if (text.includes('organization')) score += 10;
+                                
+                                const rows = Array.from(table.querySelectorAll('tr'));
+                                if (rows.length >= 2) {
+                                    const sampleCells = rows[0].querySelectorAll('th, td').length;
+                                    if (sampleCells >= 4) score += 20;
+                                    score += rows.length;
+                                }
+                                
+                                if (score > maxScore && rows.length >= 2) {
+                                    maxScore = score;
+                                    bestTable = table;
+                                }
+                            }
+                            
+                            if (!bestTable) return null;
+                            
+                            const trs = Array.from(bestTable.querySelectorAll('tr'));
+                            return trs.map(tr => 
+                                Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
+                            ).filter(row => row.length > 0);
+                        }""")
+                        
+                        if frame_matrix and len(frame_matrix) > max_rows:
+                            max_rows = len(frame_matrix)
+                            matrix = frame_matrix
+                            winning_frame = frame
+                    except Exception:
+                        continue
+
+                if not matrix or len(matrix) < 2 or not winning_frame:
+                    print("No active data container found across any frame contexts. Ending crawl run.")
+                    break
+                    
                 current_pagination_state = get_pagination_text(winning_frame)
                 print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ({current_pagination_state}) ---")
                 
-                # Dynamic keyword scoring harvester isolates the core data matrix rows
-                matrix = winning_frame.evaluate("""() => {
-                    const tables = Array.from(document.querySelectorAll('table'));
-                    if (tables.length === 0) return null;
-                    
-                    let bestTable = null;
-                    let maxScore = -1;
-                    
-                    for (const table of tables) {
-                        const text = (table.innerText || '').toLowerCase();
-                        let score = 0;
-                        
-                        if (text.includes('registration')) score += 15;
-                        if (text.includes('filing')) score += 15;
-                        if (text.includes('status')) score += 10;
-                        if (text.includes('lobbyist')) score += 15;
-                        if (text.includes('organization')) score += 10;
-                        
-                        const rows = Array.from(table.querySelectorAll('tr'));
-                        if (rows.length >= 2) {
-                            const sampleCells = rows[0].querySelectorAll('th, td').length;
-                            if (sampleCells >= 4) score += 20;
-                            score += rows.length;
-                        }
-                        
-                        if (score > maxScore && rows.length >= 2) {
-                            maxScore = score;
-                            bestTable = table;
-                        }
-                    }
-                    
-                    if (!bestTable) return null;
-                    
-                    const trs = Array.from(bestTable.querySelectorAll('tr'));
-                    return trs.map(tr => 
-                        Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
-                    ).filter(row => row.length > 0);
-                }""")
-                
-                if not matrix or len(matrix) < 2:
-                    print("No data matrix found on this page slice. Ending crawl loop.")
-                    break
-                    
                 # Align structural table column tags
                 header_row = [str(cell).strip().upper() for cell in matrix[0]]
                 is_header = any("REGISTRATION" in col or "FILING" in col for col in header_row)
@@ -221,11 +220,10 @@ def backfill_historical_registry():
                     # Brief timeout throttle protects network session tokens
                     page.wait_for_timeout(400)
                 
-                # --- FIX: TARGETING ATTRIBUTES AND TITLES ---
+                # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
                 print("Clicking next page using targeted Oracle APEX engine hooks...")
                 has_next_page = winning_frame.evaluate("""() => {
                     const links = Array.from(document.querySelectorAll('a'));
-                    // Target the link invoking gReport.navigate where the image title matches 'Next'
                     const nextLink = links.find(l => {
                         const href = l.getAttribute('href') || '';
                         const text = (l.innerText || '').toLowerCase();
