@@ -1,2 +1,2 @@
-STATUS,LOG
-FAILED,"The browser arrived at the page, but failed to extract the registry grid."
+SCRAPER_STATUS,DIAGNOSTIC_LOG
+FAILED,"The browser loaded the screen, but the intelligent keyword matrix parser found zero matching data layouts. Inspect debug_page.html."
