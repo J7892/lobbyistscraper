@@ -1,6 +1,7 @@
 """
 alberta_lobbyist_scraper.py
 Daily incremental change analyzer with automated Gmail HTML digest mailing.
+Includes advanced structural row-filtering to eliminate layout noise.
 """
 import os
 import smtplib
@@ -24,7 +25,6 @@ def send_email_digest(html_content, subject_text="Daily Lobbyist Registry Update
         print("[WARNING] Email credentials missing from GitHub secrets environment. Skipping notification.")
         return
 
-    # Gmail production SMTP relays configuration mappings
     smtp_server = "smtp.gmail.com"
     smtp_port = 587
 
@@ -38,7 +38,7 @@ def send_email_digest(html_content, subject_text="Daily Lobbyist Registry Update
     try:
         print(f"Opening secure encrypted transport channel to {smtp_server}...")
         with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()  # Initialize transport layer security handshake
+            server.starttls()
             server.login(username, password)
             server.sendmail(username, recipient, msg.as_string())
         print(f"Success! Daily update digest sent safely to target address: {recipient}")
@@ -59,16 +59,14 @@ def extract_pdf_text(pdf_path):
         return ""
 
 def execute_daily_scrape():
-    print("Initiating incremental lobbyist monitoring check...")
+    print("Initiating incremental lobbyist monitoring check with sanitation filters...")
     
-    # Load your complete backfilled history file
     if not os.path.exists(HISTORICAL_DATA_FILE):
         print(f"[FATAL] Reference historical ledger not found at destination: {HISTORICAL_DATA_FILE}")
         return
         
     historical_df = pd.read_csv(HISTORICAL_DATA_FILE)
     
-    # Track existing registrations via unique registration token keys
     if "REGISTRATION NUMBER" in historical_df.columns:
         existing_tokens = set(historical_df["REGISTRATION NUMBER"].astype(str).tolist())
     else:
@@ -107,7 +105,6 @@ def execute_daily_scrape():
                 browser.close()
                 return
 
-            # Capture live row matrix data from Page 1 to verify incoming additions
             matrix = winning_frame.evaluate("""() => {
                 const tables = Array.from(document.querySelectorAll('table'));
                 let bestTable = null; let maxScore = -1;
@@ -135,15 +132,25 @@ def execute_daily_scrape():
                 except ValueError:
                     reg_num_idx = 0
                     
-                # Evaluate front-page registrations against your 1164-row historical master baseline
                 for idx in range(data_start_idx, len(matrix)):
-                    row_data = matrix[idx]
+                    # Sanitize structural spacing elements from raw browser cell values instantly
+                    raw_row_data = matrix[idx]
+                    row_data = [str(cell).replace("\n", " ").replace("\t", " ").strip() for cell in raw_row_data]
+                    
                     if not any(row_data) or len(row_data) <= reg_num_idx:
+                        continue
+                        
+                    # DATA VALIDATION GUARD: Drop layout summary lines and framework meta-headers completely
+                    combined_row_text = "".join(row_data).upper()
+                    if "FILING DATE" in combined_row_text or "1 - 15 OF" in combined_row_text or "VIEW" == row_data[0]:
                         continue
                         
                     live_token = str(row_data[reg_num_idx])
                     
-                    # If this registration number is not found in your baseline, it's a new alert!
+                    # Ensure token matches a clean registry identifier format, skipping empty artifacts
+                    if not live_token or "REGISTRATION" in live_token.upper():
+                        continue
+                    
                     if live_token not in existing_tokens:
                         print(f" -> Frontier Alert: Detected incoming record token: {live_token}")
                         
@@ -152,7 +159,7 @@ def execute_daily_scrape():
                             with context.expect_event("download", timeout=6000) as download_info:
                                 winning_frame.evaluate("""(targetIndex) => {
                                     const tables = Array.from(document.querySelectorAll('table'));
-                                    let bestTable = null; let maxScore = -1;
+                                    let bestTable = null;
                                     for (const table of tables) {
                                         if ((table.innerText || '').toLowerCase().includes('registration')) {
                                             bestTable = table; break;
@@ -180,7 +187,6 @@ def execute_daily_scrape():
                         except Exception as click_err:
                             print(f"      * Could not download details for {live_token}: {str(click_err)}")
                             
-                        # Align layout structures
                         base_row_list = list(row_data)
                         while len(base_row_list) < len(historical_df.columns) - 1:
                             base_row_list.append("")
@@ -194,11 +200,9 @@ def execute_daily_scrape():
         finally:
             browser.close()
 
-    # --- TRANSMIT NOTIFICATIONS AND COMPILATIONS LAYER ---
     if new_records_captured:
         print(f"Processing updates for {len(new_records_captured)} new entries...")
         
-        # Format the structural dictionary array for visual rendering tables
         visual_data_summary = []
         for record in new_records_captured:
             visual_data_summary.append({
@@ -236,10 +240,8 @@ def execute_daily_scrape():
         </html>
         """
         
-        # Deliver HTML block directly to your inbox via Google's secure channel
         send_email_digest(email_body, subject_text=f"Alert: {len(new_records_captured)} New Alberta Lobbyist Registrations Detected")
         
-        # Append the new records back onto your reference file so they aren't marked as modifications tomorrow
         append_df = pd.DataFrame(new_records_captured, columns=historical_df.columns)
         append_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
         print("Master historical tracking database successfully synced and extended.")
