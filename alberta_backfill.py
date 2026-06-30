@@ -1,6 +1,6 @@
 """
 alberta_backfill.py
-Standalone comprehensive historical registry crawler using the 500-row matrix layout.
+Standalone comprehensive historical registry crawler using the 15-row pagination sequence.
 """
 import os
 import time
@@ -10,6 +10,17 @@ from playwright.sync_api import sync_playwright
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORICAL_DATA_FILE = os.path.join(CURRENT_DIR, "alberta_lobbyists_historical.csv")
 BASE_URL = "https://albertalobbyistregistry.ca/"
+
+def get_pagination_text(frame):
+    """Extracts the active row boundaries text to monitor AJAX updates safely."""
+    try:
+        return frame.evaluate("""() => {
+            const nodes = Array.from(document.querySelectorAll('td, span, div, font'));
+            const match = nodes.find(el => el.innerText && el.innerText.includes('of') && /\\d+\\s*-\\s*\\d+/.test(el.innerText));
+            return match ? match.innerText.trim() : '';
+        }""")
+    except Exception:
+        return ""
 
 def backfill_historical_registry():
     print("Initializing frame-piercing deep archive backfill pipeline...")
@@ -54,24 +65,12 @@ def backfill_historical_registry():
                 browser.close()
                 return
 
-            # --- EXPLOITING THE 500 ROW SELECTION DROPDOWN ---
-            print("Adjusting browser view configuration matrix to 500 rows per page layout...")
-            winning_frame.evaluate("""() => {
-                const rowSelects = Array.from(document.querySelectorAll('select[title="Rows Per Page"], select.a-IRR-select, select[name*="row_select"]'));
-                if (rowSelects.length > 0) {
-                    rowSelects[0].value = '500';
-                    rowSelects[0].dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }""")
-            
-            print("Waiting 15 seconds for Oracle APEX to construct and refresh the 500-row table schema...")
-            page.wait_for_timeout(15000)
-            
-            # Main pagination loop execution track
+            # Main sequential pagination loop execution track
             while True:
-                print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ---")
+                current_pagination_state = get_pagination_text(winning_frame)
+                print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ({current_pagination_state}) ---")
                 
-                # Dynamic keyword scoring harvester isolates the massive body grid over header blocks
+                # Dynamic keyword scoring harvester isolates the core data matrix rows
                 matrix = winning_frame.evaluate("""() => {
                     const tables = Array.from(document.querySelectorAll('table'));
                     if (tables.length === 0) return null;
@@ -93,7 +92,7 @@ def backfill_historical_registry():
                         if (rows.length >= 2) {
                             const sampleCells = rows[0].querySelectorAll('th, td').length;
                             if (sampleCells >= 4) score += 20;
-                            score += rows.length; // 500 rows yields a massive mathematical bonus
+                            score += rows.length;
                         }
                         
                         if (score > maxScore && rows.length >= 2) {
@@ -130,7 +129,7 @@ def backfill_historical_registry():
                     reg_num_idx = 0
                 
                 rows_in_batch = len(matrix) - data_start_idx
-                print(f"Isolated {rows_in_batch} records in page batch {page_number}. Pulling inline disclosure PDFs...")
+                print(f"Isolated {rows_in_batch} records on page {page_number}. Pulling inline disclosure PDFs...")
                 
                 # Execute sequential row-by-row clicks inside the current page view
                 for idx in range(data_start_idx, len(matrix)):
@@ -222,24 +221,40 @@ def backfill_historical_registry():
                     all_collected_records.append(extended_record)
                     
                     # Brief timeout throttle protects network session tokens
-                    page.wait_for_timeout(800)
+                    page.wait_for_timeout(400)
                 
-                # --- INTERACTIVE REPORT PAGINATION HANDLING ---
-                print("Checking for accessible subsequent layout pages...")
+                # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
+                print("Clicking next page using Oracle APEX engine hooks...")
                 has_next_page = winning_frame.evaluate("""() => {
-                    const nextButtons = Array.from(document.querySelectorAll('a[title="Next"], button[title="Next"], .a-IRR-pagination-link img[src*="next"], td.a-IRR-pagination a'));
-                    const targetLink = nextButtons.find(el => el.innerText.includes('>') || el.getAttribute('title') === 'Next' || el.outerHTML.toLowerCase().includes('next'));
-                    if (targetLink) {
-                        targetLink.click();
+                    const links = Array.from(document.querySelectorAll('a'));
+                    // Isolate Oracle APEX native report navigation function calls containing the forward token
+                    const nextLink = links.find(l => {
+                        const href = l.getAttribute('href') || '';
+                        const text = l.innerText || '';
+                        return href.includes('gReport.navigate') && (text.includes('>') || l.querySelector('img[src*="next"]') || l.querySelector('img[src*="right"]'));
+                    });
+                    if (nextLink) {
+                        nextLink.click();
                         return true;
                     }
                     return false;
                 }""")
                 
                 if has_next_page:
-                    print("Next page command verified. Waiting 12 seconds for the database chunk to load...")
+                    print("Next page action fired. Waiting for AJAX DOM updates to cycle...")
                     page_number += 1
-                    page.wait_for_timeout(12000)
+                    
+                    # Watch the DOM until the pagination row string changes state safely
+                    is_updated = False
+                    for check_attempt in range(30):
+                        page.wait_for_timeout(500)
+                        updated_pagination_state = get_pagination_text(winning_frame)
+                        if updated_pagination_state != current_pagination_state and updated_pagination_state != "":
+                            is_updated = True
+                            break
+                    
+                    if not is_updated:
+                        print("Warning: AJAX table container failed to refresh. Forcing cycle breakthrough.")
                 else:
                     print("No further pagination structures detected. Archive sweep sequence finished.")
                     break
