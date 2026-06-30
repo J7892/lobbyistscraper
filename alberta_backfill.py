@@ -1,6 +1,6 @@
 """
 alberta_backfill.py
-Standalone comprehensive historical registry crawler with built-in resumable skim-skipping tracking layers.
+Standalone comprehensive historical registry crawler with automated browser recycling safeguards.
 """
 import os
 import signal
@@ -28,286 +28,238 @@ def get_pagination_text(frame):
         return ""
 
 def backfill_historical_registry():
-    print("Initializing frame-piercing deep archive backfill pipeline with parsing safeguards...")
+    print("Initializing frame-piercing deep archive backfill pipeline with recycling safeguards...")
     
     # Configure Unix alarm signal for synchronous execution timeouts
     signal.signal(signal.SIGALRM, timeout_handler)
     
-    # Load previously processed records to enable resumable fast-forwarding
-    existing_tokens = set()
-    if os.path.exists(HISTORICAL_DATA_FILE) and os.path.getsize(HISTORICAL_DATA_FILE) > 0:
-        try:
-            existing_df = pd.read_csv(HISTORICAL_DATA_FILE)
-            if "REGISTRATION NUMBER" in existing_df.columns:
-                existing_tokens = set(existing_df["REGISTRATION NUMBER"].astype(str).tolist())
-            print(f"Found existing progress archive. Skim-skipping {len(existing_tokens)} records dynamically.")
-        except Exception as e:
-            print(f"Note: Could not parse existing data tracking sheet ({str(e)}). Starting fresh.")
+    page_number = 1
+    global_headers = None
+    
+    while True:
+        # Load processed tokens dynamically on every browser session boot to enable seamless resume steps
+        existing_tokens = set()
+        if os.path.exists(HISTORICAL_DATA_FILE) and os.path.getsize(HISTORICAL_DATA_FILE) > 0:
+            try:
+                existing_df = pd.read_csv(HISTORICAL_DATA_FILE)
+                if "REGISTRATION NUMBER" in existing_df.columns:
+                    existing_tokens = set(existing_df["REGISTRATION NUMBER"].astype(str).tolist())
+            except Exception:
+                pass
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
-        page = context.new_page()
+        print(f"\n[SYSTEM] Launching fresh isolated browser environment session. Current page tracker: {page_number}")
         
-        global_headers = None
-        page_number = 1
-        
-        try:
-            print(f"Navigating to base endpoint: {BASE_URL}")
-            page.goto(BASE_URL, wait_until="networkidle")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = context.new_page()
             
-            print("Accessing the query portal...")
-            page.locator("text=Search Registry").first.click()
-            page.wait_for_load_state("networkidle")
-            
-            print("Triggering database initialization search...")
-            page.locator("input#Search").click()
-            page.wait_for_timeout(10000)
-            
-            # Locate the winning data iframe wrapper context
-            winning_frame = None
-            for frame in page.frames:
-                try:
-                    has_table = frame.evaluate("() => document.querySelectorAll('table').length > 0")
-                    if has_table:
-                        winning_frame = frame
-                        break
-                except Exception:
-                    continue
-                    
-            if not winning_frame:
-                print("Fatal Error: Could not locate the primary database iframe wrapper context.")
-                browser.close()
-                return
-
-            # Main sequential pagination loop execution track
-            while True:
-                current_pagination_state = get_pagination_text(winning_frame)
-                print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
+            try:
+                page.goto(BASE_URL, wait_until="networkidle")
+                page.locator("text=Search Registry").first.click()
+                page.wait_for_load_state("networkidle")
+                page.locator("input#Search").click()
+                page.wait_for_timeout(12000)
                 
-                # Dynamic keyword scoring harvester isolates the core data matrix rows
-                matrix = winning_frame.evaluate("""() => {
-                    const tables = Array.from(document.querySelectorAll('table'));
-                    if (tables.length === 0) return null;
-                    
-                    let bestTable = null;
-                    let maxScore = -1;
-                    
-                    for (const table of tables) {
-                        const text = (table.innerText || '').toLowerCase();
-                        let score = 0;
-                        
-                        if (text.includes('registration')) score += 15;
-                        if (text.includes('filing')) score += 15;
-                        if (text.includes('status')) score += 10;
-                        if (text.includes('lobbyist')) score += 15;
-                        if (text.includes('organization')) score += 10;
-                        
-                        const rows = Array.from(table.querySelectorAll('tr'));
-                        if (rows.length >= 2) {
-                            const sampleCells = rows[0].querySelectorAll('th, td').length;
-                            if (sampleCells >= 4) score += 20;
-                            score += rows.length;
-                        }
-                        
-                        if (score > maxScore && rows.length >= 2) {
-                            maxScore = score;
-                            bestTable = table;
-                        }
-                    }
-                    
-                    if (!bestTable) return null;
-                    
-                    const trs = Array.from(bestTable.querySelectorAll('tr'));
-                    return trs.map(tr => 
-                        Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
-                    ).filter(row => row.length > 0);
-                }""")
-                
-                if not matrix or len(matrix) < 2:
-                    print("No data matrix found on this page slice. Ending crawl loop.")
-                    break
-                    
-                # Align structural table column tags
-                header_row = [str(cell).strip().upper() for cell in matrix[0]]
-                is_header = any("REGISTRATION" in col or "FILING" in col for col in header_row)
-                data_start_idx = 1 if is_header else 0
-                
-                if global_headers is None:
-                    global_headers = header_row if is_header else [f"FIELD_{i}" for i in range(len(matrix[0]))]
-                    if "EXTRACTED_PDF_DETAILS" not in global_headers:
-                        global_headers.append("EXTRACTED_PDF_DETAILS")
-                        
-                try:
-                    reg_num_idx = global_headers.index("REGISTRATION NUMBER")
-                except ValueError:
-                    reg_num_idx = 0
-                
-                rows_in_batch = len(matrix) - data_start_idx
-                page_records = []
-                
-                # Execute sequential row-by-row clicks inside the current page view
-                for idx in range(data_start_idx, len(matrix)):
-                    row_data = matrix[idx]
-                    if not any(row_data):
-                        continue
-                        
-                    reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
-                    current_item_num = idx - data_start_idx + 1
-                    
-                    # RESUMABLE CHECKPOINT: Skip rows that already exist in the baseline CSV
-                    if str(reg_token) in existing_tokens:
-                        print(f" -> [{current_item_num}/{rows_in_batch}] Skim-skipping record {reg_token} (Already Indexed)")
-                        continue
-                        
-                    print(f" -> [{current_item_num}/{rows_in_batch}] Downloading disclosure PDF for {reg_token}...")
-                    pdf_text = "No tracking details extracted from profile disclosure file"
-                    
+                winning_frame = None
+                for frame in page.frames:
                     try:
-                        with context.expect_event("download", timeout=5000) as download_info:
-                            winning_frame.evaluate("""(targetIndex) => {
-                                const tables = Array.from(document.querySelectorAll('table'));
-                                let bestTable = null;
-                                let maxScore = -1;
-                                
-                                for (const table of tables) {
-                                    const text = (table.innerText || '').toLowerCase();
-                                    let score = 0;
-                                    
-                                    if (text.includes('registration')) score += 15;
-                                    if (text.includes('filing')) score += 15;
-                                    if (text.includes('status')) score += 10;
-                                    if (text.includes('lobbyist')) score += 15;
-                                    if (text.includes('organization')) score += 10;
-                                    
-                                    const rows = Array.from(table.querySelectorAll('tr'));
-                                    if (rows.length >= 2) {
-                                        const sampleCells = rows[0].querySelectorAll('th, td').length;
-                                        if (sampleCells >= 4) score += 20;
-                                        score += rows.length;
+                        if frame.evaluate("() => document.querySelectorAll('table').length > 0"):
+                            winning_frame = frame
+                            break
+                    except Exception:
+                        continue
+                        
+                if not winning_frame:
+                    print("[ERROR] Could not isolate table frame context. Re-attempting session boot...")
+                    browser.close()
+                    continue
+
+                # Fast-forward the newly opened browser instance to our active working page split
+                if page_number > 1:
+                    print(f"[SYSTEM] Fast-forwarding browser session to active page target slice: {page_number}")
+                    for ff_step in range(1, page_number):
+                        winning_frame.evaluate("""() => {
+                            const links = Array.from(document.querySelectorAll('a'));
+                            const nextLink = links.find(l => (l.getAttribute('href') || '').includes('gReport.navigate') && 
+                                           ((l.getAttribute('title') || '').toLowerCase().includes('next') || l.innerText.includes('>')));
+                            if (nextLink) nextLink.click();
+                        }""")
+                        page.wait_for_timeout(2500)
+                    print("[SYSTEM] Fast-forward positioning synchronized successfully.")
+
+                # Process a fixed block of 15 pages before cycling the browser instance to kill memory leaks
+                session_pages_processed = 0
+                while session_pages_processed < 15:
+                    current_pagination_state = get_pagination_text(winning_frame)
+                    print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
+                    
+                    matrix = winning_frame.evaluate("""() => {
+                        const tables = Array.from(document.querySelectorAll('table'));
+                        if (tables.length === 0) return null;
+                        let bestTable = null; let maxScore = -1;
+                        for (const table of tables) {
+                            const text = (table.innerText || '').toLowerCase();
+                            let score = 0;
+                            if (text.includes('registration')) score += 15;
+                            if (text.includes('filing')) score += 15;
+                            const rows = Array.from(table.querySelectorAll('tr'));
+                            if (rows.length >= 2) score += 20 + rows.length;
+                            if (score > maxScore && rows.length >= 2) { maxScore = score; bestTable = table; }
+                        }
+                        if (!bestTable) return null;
+                        return Array.from(bestTable.querySelectorAll('tr')).map(tr => 
+                            Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
+                        ).filter(row => row.length > 0);
+                    }""")
+                    
+                    if not matrix or len(matrix) < 2:
+                        print("[SYSTEM] Reached the end of active database tables. Closing pipeline.")
+                        browser.close()
+                        return
+                        
+                    header_row = [str(cell).strip().upper() for cell in matrix[0]]
+                    is_header = any("REGISTRATION" in col or "FILING" in col for col in header_row)
+                    data_start_idx = 1 if is_header else 0
+                    
+                    if global_headers is None:
+                        global_headers = header_row if is_header else [f"FIELD_{i}" for i in range(len(matrix[0]))]
+                        if "EXTRACTED_PDF_DETAILS" not in global_headers:
+                            global_headers.append("EXTRACTED_PDF_DETAILS")
+                            
+                    try:
+                        reg_num_idx = global_headers.index("REGISTRATION NUMBER")
+                    except ValueError:
+                        reg_num_idx = 0
+                    
+                    rows_in_batch = len(matrix) - data_start_idx
+                    page_records = []
+                    
+                    for idx in range(data_start_idx, len(matrix)):
+                        row_data = matrix[idx]
+                        if not any(row_data): continue
+                        
+                        reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
+                        current_item_num = idx - data_start_idx + 1
+                        
+                        if str(reg_token) in existing_tokens:
+                            print(f" -> [{current_item_num}/{rows_in_batch}] Skim-skipping record {reg_token} (Already Indexed)")
+                            continue
+                            
+                        print(f" -> [{current_item_num}/{rows_in_batch}] Downloading disclosure PDF for {reg_token}...")
+                        pdf_text = "No tracking details extracted from profile disclosure file"
+                        
+                        try:
+                            with context.expect_event("download", timeout=6000) as download_info:
+                                winning_frame.evaluate("""(targetIndex) => {
+                                    const tables = Array.from(document.querySelectorAll('table'));
+                                    let bestTable = null; let maxScore = -1;
+                                    for (const table of tables) {
+                                        const text = (table.innerText || '').toLowerCase();
+                                        let score = 0; if (text.includes('registration')) score += 15;
+                                        const rows = Array.from(table.querySelectorAll('tr'));
+                                        if (rows.length >= 2) score += rows.length;
+                                        if (score > maxScore && rows.length >= 2) { maxScore = score; bestTable = table; }
                                     }
-                                    
-                                    if (score > maxScore && rows.length >= 2) {
-                                        maxScore = score;
-                                        bestTable = table;
-                                    }
-                                }
-                                
-                                if (bestTable) {
-                                    const trs = Array.from(bestTable.querySelectorAll('tr'));
-                                    if (targetIndex < trs.length) {
-                                        const cells = trs[targetIndex].querySelectorAll('td');
-                                        if (cells.length > 0) {
-                                            const finalCell = cells[cells.length - 1];
-                                            const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
-                                            activationNode.click();
+                                    if (bestTable) {
+                                        const trs = Array.from(bestTable.querySelectorAll('tr'));
+                                        if (targetIndex < trs.length) {
+                                            const cells = trs[targetIndex].querySelectorAll('td');
+                                            if (cells.length > 0) {
+                                                const finalCell = cells[cells.length - 1];
+                                                // PRECISION TARGETING: Find the absolute inner link anchor or image tag node directly
+                                                const activationNode = finalCell.querySelector('a, href, img') || finalCell;
+                                                activationNode.click();
+                                            }
                                         }
                                     }
-                                }
-                            }""", idx)
+                                }""", idx)
+                                
+                            download = download_info.value
+                            temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
+                            download.save_as(temp_pdf_path)
                             
-                        download = download_info.value
-                        temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
-                        download.save_as(temp_pdf_path)
+                            signal.alarm(8)
+                            try:
+                                from pypdf import PdfReader
+                                reader = PdfReader(temp_pdf_path)
+                                text_accumulator = []
+                                for individual_page in reader.pages:
+                                    page_content = individual_page.extract_text()
+                                    if page_content: text_accumulator.append(page_content)
+                                if text_accumulator:
+                                    pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
+                            except TimeoutException:
+                                pdf_text = "PDF processing time limit exceeded - raw text unindexed"
+                            finally:
+                                signal.alarm(0)
+                                
+                            if os.path.exists(temp_pdf_path): os.remove(temp_pdf_path)
+                                
+                        except Exception as e:
+                            print(f"    * Notice: Skipped/Timed Out row {reg_token}: {str(e)}")
+                            pdf_text = "PDF entry data lookup skipped or document format unreadable"
                         
-                        # Process target binary text contents with a strict 8-second execution timeout guard
-                        signal.alarm(8)
-                        try:
-                            from pypdf import PdfReader
-                            reader = PdfReader(temp_pdf_path)
-                            text_accumulator = []
-                            for individual_page in reader.pages:
-                                page_content = individual_page.extract_text()
-                                if page_content:
-                                    text_accumulator.append(page_content)
-                                    
-                            if text_accumulator:
-                                pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
-                        except TimeoutException:
-                            print(f"    * Warning: PDF text engine parsing timed out for token {reg_token}. Skipping extraction layer.")
-                            pdf_text = "PDF processing time limit exceeded - raw text unindexed"
-                        finally:
-                            signal.alarm(0) # Reset Unix timer trigger
-                            
-                        if os.path.exists(temp_pdf_path):
-                            os.remove(temp_pdf_path)
-                            
-                    except Exception as download_error:
-                        print(f"    * Notice: Download skipped or timed out for token {reg_token}: {str(download_error)}")
-                        pdf_text = "PDF entry data lookup skipped or document format unreadable"
-                    
-                    # Normalize formatting arrays before storage pushes
-                    base_row_list = list(row_data)
-                    while len(base_row_list) < (len(global_headers) - 1):
-                        base_row_list.append("")
-                    if len(base_row_list) > (len(global_headers) - 1):
-                        base_row_list = base_row_list[:len(global_headers) - 1]
+                        base_row_list = list(row_data)
+                        while len(base_row_list) < (len(global_headers) - 1): base_row_list.append("")
+                        if len(base_row_list) > (len(global_headers) - 1): base_row_list = base_row_list[:len(global_headers) - 1]
                         
-                    extended_record = base_row_list + [pdf_text]
-                    page_records.append(extended_record)
-                    page.wait_for_timeout(400)
-                
-                # Checkpoint Write: Save new pages incrementally
-                if page_records:
-                    chunk_df = pd.DataFrame(page_records, columns=global_headers)
-                    cleaned_cols = [c for c in chunk_df.columns if "COLUMN_" in c or "VIEW" in c]
-                    if cleaned_cols:
-                        chunk_df = chunk_df.drop(columns=cleaned_cols)
+                        page_records.append(base_row_list + [pdf_text])
+                        page.wait_for_timeout(400)
                     
-                    if not os.path.exists(HISTORICAL_DATA_FILE):
-                        chunk_df.to_csv(HISTORICAL_DATA_FILE, index=False)
+                    if page_records:
+                        chunk_df = pd.DataFrame(page_records, columns=global_headers)
+                        cleaned_cols = [c for c in chunk_df.columns if "COLUMN_" in c or "VIEW" in c]
+                        if cleaned_cols: chunk_df = chunk_df.drop(columns=cleaned_cols)
+                        
+                        if not os.path.exists(HISTORICAL_DATA_FILE):
+                            chunk_df.to_csv(HISTORICAL_DATA_FILE, index=False)
+                        else:
+                            chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
+                        print(f"Incremental Checkpoint: Saved Page {page_number} changes to disk.")
+                    
+                    print("Clicking next page using targeted Oracle APEX engine hooks...")
+                    has_next_page = winning_frame.evaluate("""() => {
+                        const links = Array.from(document.querySelectorAll('a'));
+                        const nextLink = links.find(l => {
+                            const href = l.getAttribute('href') || '';
+                            const text = (l.innerText || '').toLowerCase();
+                            const img = l.querySelector('img');
+                            const imgTitle = img ? (img.getAttribute('title') || img.getAttribute('alt') || '').toLowerCase() : '';
+                            return href.includes('gReport.navigate') && (imgTitle.includes('next') || text.includes('next') || text.includes('>'));
+                        });
+                        if (nextLink) { nextLink.click(); return true; }
+                        return false;
+                    }""")
+                    
+                    if has_next_page:
+                        page_number += 1
+                        session_cycles_verified = False
+                        for check_attempt in range(30):
+                            page.wait_for_timeout(500)
+                            updated_state = get_pagination_text(winning_frame)
+                            if updated_state != current_pagination_state and updated_state != "":
+                                session_cycles_verified = True
+                                break
+                        if not session_cycles_verified:
+                            print("[WARNING] AJAX boundary string refresh missed.")
+                        session_pages_processed += 1
                     else:
-                        chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
-                    print(f"Incremental Checkpoint: Saved Page {page_number} changes to disk.")
-                
-                # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
-                print("Clicking next page using targeted Oracle APEX engine hooks...")
-                has_next_page = winning_frame.evaluate("""() => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const nextLink = links.find(l => {
-                        const href = l.getAttribute('href') || '';
-                        const text = (l.innerText || '').toLowerCase();
-                        const img = l.querySelector('img');
-                        const imgTitle = img ? (img.getAttribute('title') || img.getAttribute('alt') || '').toLowerCase() : '';
+                        print("No further pagination structures detected. Backfill sequence finished.")
+                        browser.close()
+                        return
                         
-                        return href.includes('gReport.navigate') && 
-                               (imgTitle.includes('next') || text.includes('next') || text.includes('>'));
-                    });
-                    if (nextLink) {
-                        nextLink.click();
-                        return true;
-                    }
-                    return false;
-                }""")
+                print("[SYSTEM] Target session threshold reached. Recycling browser process to protect pipes...")
+                browser.close()
                 
-                if has_next_page:
-                    print("Next page action fired. Waiting for AJAX DOM updates to cycle...")
-                    page_number += 1
-                    
-                    is_updated = False
-                    for check_attempt in range(30):
-                        page.wait_for_timeout(500)
-                        updated_pagination_state = get_pagination_text(winning_frame)
-                        if updated_pagination_state != current_pagination_state and updated_pagination_state != "":
-                            is_updated = True
-                            break
-                    
-                    if not is_updated:
-                        print("Warning: AJAX table container failed to refresh. Forcing cycle breakthrough.")
-                else:
-                    print("No further pagination structures detected. Archive sweep sequence finished.")
-                    break
-                    
-        except Exception as pipeline_fault:
-            print(f"Backfill stream execution halted by system fault: {str(pipeline_fault)}")
-            
-        finally:
-            browser.close()
-            
-        print("\nPipeline run concluded. Master ledger is fully compiled and locked.")
+            except Exception as loop_fault:
+                print(f"[SYSTEM CRASH] Active session environment collapsed: {str(loop_fault)}")
+                try: browser.close()
+                except Exception: pass
+                page.wait_for_timeout(5000)
 
 if __name__ == "__main__":
     backfill_historical_registry()
