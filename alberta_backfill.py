@@ -1,0 +1,225 @@
+"""
+alberta_backfill.py
+Standalone comprehensive historical registry crawler using the 500-row matrix layout.
+"""
+import os
+import time
+import pandas as pd
+from playwright.sync_api import sync_playwright
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORICAL_DATA_FILE = os.path.join(CURRENT_DIR, "alberta_lobbyists_historical.csv")
+BASE_URL = "https://albertalobbyistregistry.ca/"
+
+def backfill_historical_registry():
+    print("Initializing frame-piercing deep archive backfill pipeline...")
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
+        page = context.new_page()
+        
+        all_collected_records = []
+        global_headers = None
+        page_number = 1
+        
+        try:
+            print(f"Navigating to base endpoint: {BASE_URL}")
+            page.goto(BASE_URL, wait_until="networkidle")
+            
+            print("Accessing the query portal...")
+            page.locator("text=Search Registry").first.click()
+            page.wait_for_load_state("networkidle")
+            
+            print("Triggering database initialization search...")
+            page.locator("input#Search").click()
+            page.wait_for_timeout(10000)
+            
+            # Locate the winning data iframe wrapper context
+            winning_frame = None
+            for frame in page.frames:
+                try:
+                    has_table = frame.evaluate("() => document.querySelectorAll('table').length > 0")
+                    if has_table:
+                        winning_frame = frame
+                        break
+                except Exception:
+                    continue
+                    
+            if not winning_frame:
+                print("Fatal Error: Could not locate the primary database iframe wrapper context.")
+                browser.close()
+                return
+
+            # --- EXPLOITING THE 500 ROW SELECTION DROPDOWN ---
+            print("Adjusting browser view configuration matrix to 500 rows per page layout...")
+            winning_frame.evaluate("""() => {
+                const rowSelects = Array.from(document.querySelectorAll('select[title="Rows Per Page"], select.a-IRR-select, select[name*="row_select"]'));
+                if (rowSelects.length > 0) {
+                    rowSelects[0].value = '500';
+                    rowSelects[0].dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }""")
+            
+            print("Waiting 15 seconds for Oracle APEX to construct and refresh the 500-row table schema...")
+            page.wait_for_timeout(15000)
+            
+            # Main pagination loop execution track
+            while True:
+                print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ---")
+                
+                # Extract data layout definitions from active frame
+                matrix = winning_frame.evaluate("""() => {
+                    const tables = Array.from(document.querySelectorAll('table'));
+                    let bestTable = tables.find(t => (t.innerText || '').toLowerCase().includes('registration'));
+                    if (!bestTable && tables.length > 0) {
+                        bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {table: t, rows: t.querySelectorAll('tr').length} : max, {table: null, rows: 0}).table;
+                    }
+                    if (!bestTable) return null;
+                    
+                    const trs = Array.from(bestTable.querySelectorAll('tr'));
+                    return trs.map(tr => 
+                        Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
+                    ).filter(row => row.length > 0);
+                }""")
+                
+                if not matrix or len(matrix) < 2:
+                    print("No data matrix found on this page slice. Ending crawl loop.")
+                    break
+                    
+                # Align structural table column tags
+                header_row = [str(cell).strip().upper() for cell in matrix[0]]
+                is_header = any("REGISTRATION" in col or "FILING" in col for col in header_row)
+                data_start_idx = 1 if is_header else 0
+                
+                if global_headers is None:
+                    global_headers = header_row if is_header else [f"FIELD_{i}" for i in range(len(matrix[0]))]
+                    if "EXTRACTED_PDF_DETAILS" not in global_headers:
+                        global_headers.append("EXTRACTED_PDF_DETAILS")
+                        
+                try:
+                    reg_num_idx = global_headers.index("REGISTRATION NUMBER")
+                except ValueError:
+                    reg_num_idx = 0
+                
+                rows_in_batch = len(matrix) - data_start_idx
+                print(f"Isolated {rows_in_batch} records in page batch {page_number}. Pulling inline disclosure PDFs...")
+                
+                # Execute sequential row-by-row clicks inside the current page view
+                for idx in range(data_start_idx, len(matrix)):
+                    row_data = matrix[idx]
+                    if not any(row_data):
+                        continue
+                        
+                    reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
+                    current_item_num = idx - data_start_idx + 1
+                    print(f" -> Processing disclosure form text [{current_item_num}/{rows_in_batch}]: Record ID {reg_token}")
+                    
+                    pdf_text = "No tracking details extracted from profile disclosure file"
+                    
+                    try:
+                        # Monitor and intercept the specific async download stream link
+                        with context.expect_event("download", timeout=15000) as download_info:
+                            winning_frame.evaluate(f"""(targetIndex) => {{
+                                const tables = Array.from(document.querySelectorAll('table'));
+                                let bestTable = tables.find(t => (t.innerText || '').toLowerCase().includes('registration'));
+                                if (!bestTable && tables.length > 0) {{
+                                    bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {{table: t, rows: t.querySelectorAll('tr').length}} : max, {{table: null, rows: 0}}).table;
+                                }}
+                                if (bestTable) {{
+                                    const trs = Array.from(bestTable.querySelectorAll('tr'));
+                                    if (targetIndex < trs.length) {{
+                                        const cells = trs[targetIndex].querySelectorAll('td');
+                                        if (cells.length > 0) {{
+                                            const finalCell = cells[cells.length - 1];
+                                            const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
+                                            activationNode.click();
+                                        }}
+                                    }
+                                }}
+                            }}""", idx)
+                            
+                        download = download_info.value
+                        temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
+                        download.save_as(temp_pdf_path)
+                        
+                        # Process target binary text contents to continuous string structures
+                        from pypdf import PdfReader
+                        reader = PdfReader(temp_pdf_path)
+                        text_accumulator = []
+                        for individual_page in reader.pages:
+                            page_content = individual_page.extract_text()
+                            if page_content:
+                                text_accumulator.append(page_content)
+                                
+                        if text_accumulator:
+                            pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
+                            
+                        if os.path.exists(temp_pdf_path):
+                            os.remove(temp_pdf_path)
+                            
+                    except Exception as download_error:
+                        print(f"    * Notice: PDF conversion row download pass skipped for token {reg_token}: {str(download_error)}")
+                        pdf_text = "PDF entry data lookup skipped or document format unreadable"
+                    
+                    # Normalize formatting arrays before storage pushes
+                    base_row_list = list(row_data)
+                    # Sync short row anomalies if links drop elements
+                    while len(base_row_list) < (len(global_headers) - 1):
+                        base_row_list.append("")
+                    if len(base_row_list) > (len(global_headers) - 1):
+                        base_row_list = base_row_list[:len(global_headers) - 1]
+                        
+                    extended_record = base_row_list + [pdf_text]
+                    all_collected_records.append(extended_record)
+                    
+                    # Brief timeout throttle protects network session tokens
+                    page.wait_for_timeout(800)
+                
+                # --- INTERACTIVE REPORT PAGINATION HANDLING ---
+                print("Checking for accessible subsequent layout pages...")
+                has_next_page = winning_frame.evaluate("""() => {
+                    // Look for common APEX pagination button layouts or images pointing right
+                    const nextButtons = Array.from(document.querySelectorAll('a[title="Next"], button[title="Next"], .a-IRR-pagination-link img[src*="next"], td.a-IRR-pagination a'));
+                    // Isolate the link that explicitly handles moving forward or contains navigation text
+                    const targetLink = nextButtons.find(el => el.innerText.includes('>') || el.getAttribute('title') === 'Next' || el.outerHTML.toLowerCase().includes('next'));
+                    if (targetLink) {
+                        targetLink.click();
+                        return true;
+                    }
+                    return false;
+                }""")
+                
+                if has_next_page:
+                    print("Next page command verified. Waiting 12 seconds for the database chunk to load...")
+                    page_number += 1
+                    page.wait_for_timeout(12000)
+                else:
+                    print("No further pagination structures detected. Archive sweep sequence finished.")
+                    break
+                    
+        except Exception as pipeline_fault:
+            print(f"Backfill stream execution halted by system fault: {str(pipeline_fault)}")
+            
+        finally:
+            browser.close()
+            
+        if all_collected_records:
+            print(f"\nCompiling dataset baseline containing {len(all_collected_records)} parsed elements...")
+            historical_df = pd.DataFrame(all_collected_records, columns=global_headers)
+            
+            # Strip functional structural metadata labels before writing files
+            cleaned_cols = [c for c in historical_df.columns if "COLUMN_" in c or "VIEW" in c]
+            if cleaned_cols:
+                historical_df = historical_df.drop(columns=cleaned_cols)
+                
+            historical_df.to_csv(HISTORICAL_DATA_FILE, index=False)
+            print(f"Success! Master archive written safely to absolute ledger destination: {HISTORICAL_DATA_FILE}")
+        else:
+            print("System finished crawl run with zero collected text matrices.")
+
+if __name__ == "__main__":
+    backfill_historical_registry()
