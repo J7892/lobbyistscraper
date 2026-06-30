@@ -1,0 +1,47 @@
+name: Daily Lobbyist Monitor
+
+on:
+  schedule:
+    # Triggers every single day at precisely 7:00 AM local Toronto time
+    - cron: '0 7 * * *'
+      timezone: 'America/Toronto'
+  workflow_dispatch: # Keeps the manual run button active for manual overrides
+
+jobs:
+  scrape_and_notify:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas playwright pypdf
+
+    - name: Install Playwright Chromium Browser
+      run: |
+        playwright install chromium
+
+    - name: Run Daily Tracker and Email Digest
+      env:
+        # Securely maps your vault secrets directly to runtime variables
+        SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+        SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+      run: |
+        python alberta_lobbyist_scraper.py
+
+    - name: Commit Updated Reference Data
+      run: |
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "actions@github.com"
+        git add alberta_lobbyists_historical.csv || true
+        git commit -m "Automated Sync: Updating historical baseline table structures" || true
+        git push || true
