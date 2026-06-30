@@ -1,14 +1,21 @@
 """
 alberta_backfill.py
-Standalone comprehensive historical registry crawler using the 15-row pagination sequence.
+Standalone comprehensive historical registry crawler with built-in resumable skim-skipping tracking layers.
 """
 import os
+import signal
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORICAL_DATA_FILE = os.path.join(CURRENT_DIR, "alberta_lobbyists_historical.csv")
 BASE_URL = "https://albertalobbyistregistry.ca/"
+
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("PDF parsing took too long")
 
 def get_pagination_text(frame):
     """Extracts the active row boundaries text to monitor AJAX updates safely."""
@@ -21,8 +28,22 @@ def get_pagination_text(frame):
         return ""
 
 def backfill_historical_registry():
-    print("Initializing frame-piercing deep archive backfill pipeline...")
+    print("Initializing frame-piercing deep archive backfill pipeline with parsing safeguards...")
     
+    # Configure Unix alarm signal for synchronous execution timeouts
+    signal.signal(signal.SIGALRM, timeout_handler)
+    
+    # Load previously processed records to enable resumable fast-forwarding
+    existing_tokens = set()
+    if os.path.exists(HISTORICAL_DATA_FILE) and os.path.getsize(HISTORICAL_DATA_FILE) > 0:
+        try:
+            existing_df = pd.read_csv(HISTORICAL_DATA_FILE)
+            if "REGISTRATION NUMBER" in existing_df.columns:
+                existing_tokens = set(existing_df["REGISTRATION NUMBER"].astype(str).tolist())
+            print(f"Found existing progress archive. Skim-skipping {len(existing_tokens)} records dynamically.")
+        except Exception as e:
+            print(f"Note: Could not parse existing data tracking sheet ({str(e)}). Starting fresh.")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -31,7 +52,6 @@ def backfill_historical_registry():
         )
         page = context.new_page()
         
-        all_collected_records = []
         global_headers = None
         page_number = 1
         
@@ -45,71 +65,72 @@ def backfill_historical_registry():
             
             print("Triggering database initialization search...")
             page.locator("input#Search").click()
+            page.wait_for_timeout(10000)
             
-            print("Waiting 15 seconds for search results and frames to fully generate...")
-            page.wait_for_timeout(15000)
-            
+            # Locate the winning data iframe wrapper context
+            winning_frame = None
+            for frame in page.frames:
+                try:
+                    has_table = frame.evaluate("() => document.querySelectorAll('table').length > 0")
+                    if has_table:
+                        winning_frame = frame
+                        break
+                except Exception:
+                    continue
+                    
+            if not winning_frame:
+                print("Fatal Error: Could not locate the primary database iframe wrapper context.")
+                browser.close()
+                return
+
             # Main sequential pagination loop execution track
             while True:
-                # Dynamically locate the data matrix and frame on every loop cycle
-                matrix = None
-                max_rows = 0
-                winning_frame = None
+                current_pagination_state = get_pagination_text(winning_frame)
+                print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
                 
-                for frame in page.frames:
-                    try:
-                        frame_matrix = frame.evaluate("""() => {
-                            const tables = Array.from(document.querySelectorAll('table'));
-                            if (tables.length === 0) return null;
-                            
-                            let bestTable = null;
-                            let maxScore = -1;
-                            
-                            for (const table of tables) {
-                                const text = (table.innerText || '').toLowerCase();
-                                let score = 0;
-                                
-                                if (text.includes('registration')) score += 15;
-                                if (text.includes('filing')) score += 15;
-                                if (text.includes('status')) score += 10;
-                                if (text.includes('lobbyist')) score += 15;
-                                if (text.includes('organization')) score += 10;
-                                
-                                const rows = Array.from(table.querySelectorAll('tr'));
-                                if (rows.length >= 2) {
-                                    const sampleCells = rows[0].querySelectorAll('th, td').length;
-                                    if (sampleCells >= 4) score += 20;
-                                    score += rows.length;
-                                }
-                                
-                                if (score > maxScore && rows.length >= 2) {
-                                    maxScore = score;
-                                    bestTable = table;
-                                }
-                            }
-                            
-                            if (!bestTable) return null;
-                            
-                            const trs = Array.from(bestTable.querySelectorAll('tr'));
-                            return trs.map(tr => 
-                                Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
-                            ).filter(row => row.length > 0);
-                        }""")
+                # Dynamic keyword scoring harvester isolates the core data matrix rows
+                matrix = winning_frame.evaluate("""() => {
+                    const tables = Array.from(document.querySelectorAll('table'));
+                    if (tables.length === 0) return null;
+                    
+                    let bestTable = null;
+                    let maxScore = -1;
+                    
+                    for (const table of tables) {
+                        const text = (table.innerText || '').toLowerCase();
+                        let score = 0;
                         
-                        if frame_matrix and len(frame_matrix) > max_rows:
-                            max_rows = len(frame_matrix)
-                            matrix = frame_matrix
-                            winning_frame = frame
-                    except Exception:
-                        continue
-
-                if not matrix or len(matrix) < 2 or not winning_frame:
-                    print("No active data container found across any frame contexts. Ending crawl run.")
+                        if (text.includes('registration')) score += 15;
+                        if (text.includes('filing')) score += 15;
+                        if (text.includes('status')) score += 10;
+                        if (text.includes('lobbyist')) score += 15;
+                        if (text.includes('organization')) score += 10;
+                        
+                        const rows = Array.from(table.querySelectorAll('tr'));
+                        if (rows.length >= 2) {
+                            const sampleCells = rows[0].querySelectorAll('th, td').length;
+                            if (sampleCells >= 4) score += 20;
+                            score += rows.length;
+                        }
+                        
+                        if (score > maxScore && rows.length >= 2) {
+                            maxScore = score;
+                            bestTable = table;
+                        }
+                    }
+                    
+                    if (!bestTable) return null;
+                    
+                    const trs = Array.from(bestTable.querySelectorAll('tr'));
+                    return trs.map(tr => 
+                        Array.from(tr.querySelectorAll('th, td')).map(c => (c.innerText || '').trim())
+                    ).filter(row => row.length > 0);
+                }""")
+                
+                if not matrix or len(matrix) < 2:
+                    print("No data matrix found on this page slice. Ending crawl loop.")
                     break
                     
-                current_pagination_state = get_pagination_text(winning_frame)
-                print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ({current_pagination_state}) ---")
-                
                 # Align structural table column tags
                 header_row = [str(cell).strip().upper() for cell in matrix[0]]
                 is_header = any("REGISTRATION" in col or "FILING" in col for col in header_row)
@@ -126,7 +147,7 @@ def backfill_historical_registry():
                     reg_num_idx = 0
                 
                 rows_in_batch = len(matrix) - data_start_idx
-                print(f"Isolated {rows_in_batch} records on page {page_number}. Pulling inline disclosure PDFs...")
+                page_records = []
                 
                 # Execute sequential row-by-row clicks inside the current page view
                 for idx in range(data_start_idx, len(matrix)):
@@ -136,12 +157,16 @@ def backfill_historical_registry():
                         
                     reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
                     current_item_num = idx - data_start_idx + 1
-                    print(f" -> Processing disclosure form text [{current_item_num}/{rows_in_batch}]: Record ID {reg_token}")
                     
+                    # RESUMABLE CHECKPOINT: Skip rows that already exist in the baseline CSV
+                    if str(reg_token) in existing_tokens:
+                        print(f" -> [{current_item_num}/{rows_in_batch}] Skim-skipping record {reg_token} (Already Indexed)")
+                        continue
+                        
+                    print(f" -> [{current_item_num}/{rows_in_batch}] Downloading disclosure PDF for {reg_token}...")
                     pdf_text = "No tracking details extracted from profile disclosure file"
                     
                     try:
-                        # Synchronized row click routine targeting the scored table matrix
                         with context.expect_event("download", timeout=5000) as download_info:
                             winning_frame.evaluate("""(targetIndex) => {
                                 const tables = Array.from(document.querySelectorAll('table'));
@@ -188,17 +213,24 @@ def backfill_historical_registry():
                         temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
                         download.save_as(temp_pdf_path)
                         
-                        # Process target binary text contents to continuous string structures
-                        from pypdf import PdfReader
-                        reader = PdfReader(temp_pdf_path)
-                        text_accumulator = []
-                        for individual_page in reader.pages:
-                            page_content = individual_page.extract_text()
-                            if page_content:
-                                text_accumulator.append(page_content)
-                                
-                        if text_accumulator:
-                            pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
+                        # Process target binary text contents with a strict 8-second execution timeout guard
+                        signal.alarm(8)
+                        try:
+                            from pypdf import PdfReader
+                            reader = PdfReader(temp_pdf_path)
+                            text_accumulator = []
+                            for individual_page in reader.pages:
+                                page_content = individual_page.extract_text()
+                                if page_content:
+                                    text_accumulator.append(page_content)
+                                    
+                            if text_accumulator:
+                                pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
+                        except TimeoutException:
+                            print(f"    * Warning: PDF text engine parsing timed out for token {reg_token}. Skipping extraction layer.")
+                            pdf_text = "PDF processing time limit exceeded - raw text unindexed"
+                        finally:
+                            signal.alarm(0) # Reset Unix timer trigger
                             
                         if os.path.exists(temp_pdf_path):
                             os.remove(temp_pdf_path)
@@ -215,10 +247,21 @@ def backfill_historical_registry():
                         base_row_list = base_row_list[:len(global_headers) - 1]
                         
                     extended_record = base_row_list + [pdf_text]
-                    all_collected_records.append(extended_record)
-                    
-                    # Brief timeout throttle protects network session tokens
+                    page_records.append(extended_record)
                     page.wait_for_timeout(400)
+                
+                # Checkpoint Write: Save new pages incrementally
+                if page_records:
+                    chunk_df = pd.DataFrame(page_records, columns=global_headers)
+                    cleaned_cols = [c for c in chunk_df.columns if "COLUMN_" in c or "VIEW" in c]
+                    if cleaned_cols:
+                        chunk_df = chunk_df.drop(columns=cleaned_cols)
+                    
+                    if not os.path.exists(HISTORICAL_DATA_FILE):
+                        chunk_df.to_csv(HISTORICAL_DATA_FILE, index=False)
+                    else:
+                        chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
+                    print(f"Incremental Checkpoint: Saved Page {page_number} changes to disk.")
                 
                 # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
                 print("Clicking next page using targeted Oracle APEX engine hooks...")
@@ -244,7 +287,6 @@ def backfill_historical_registry():
                     print("Next page action fired. Waiting for AJAX DOM updates to cycle...")
                     page_number += 1
                     
-                    # Watch the DOM until the pagination row string changes state safely
                     is_updated = False
                     for check_attempt in range(30):
                         page.wait_for_timeout(500)
@@ -265,18 +307,7 @@ def backfill_historical_registry():
         finally:
             browser.close()
             
-        if all_collected_records:
-            print(f"\nCompiling dataset baseline containing {len(all_collected_records)} parsed elements...")
-            historical_df = pd.DataFrame(all_collected_records, columns=global_headers)
-            
-            cleaned_cols = [c for c in historical_df.columns if "COLUMN_" in c or "VIEW" in c]
-            if cleaned_cols:
-                historical_df = historical_df.drop(columns=cleaned_cols)
-                
-            historical_df.to_csv(HISTORICAL_DATA_FILE, index=False)
-            print(f"Success! Master archive written safely to absolute ledger destination: {HISTORICAL_DATA_FILE}")
-        else:
-            print("System finished crawl run with zero collected text matrices.")
+        print("\nPipeline run concluded. Master ledger is fully compiled and locked.")
 
 if __name__ == "__main__":
     backfill_historical_registry()
