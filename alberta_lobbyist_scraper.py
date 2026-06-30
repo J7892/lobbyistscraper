@@ -63,8 +63,8 @@ def fetch_registry_data(diagnostic_holder):
         matrix = None
         max_rows = 0
         
-        # Compile a list of all active frame contexts (Main page + any embedded iframes)
-        all_frames = [page.main_frame] + page.child_frames
+        # FIX: Directly use page.frames to fetch all attached frames safely in Python
+        all_frames = page.frames
         
         for frame in all_frames:
             try:
