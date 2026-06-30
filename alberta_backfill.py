@@ -3,7 +3,6 @@ alberta_backfill.py
 Standalone comprehensive historical registry crawler using the 15-row pagination sequence.
 """
 import os
-import time
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -15,9 +14,8 @@ def get_pagination_text(frame):
     """Extracts the active row boundaries text to monitor AJAX updates safely."""
     try:
         return frame.evaluate("""() => {
-            const nodes = Array.from(document.querySelectorAll('td, span, div, font'));
-            const match = nodes.find(el => el.innerText && el.innerText.includes('of') && /\\d+\\s*-\\s*\\d+/.test(el.innerText));
-            return match ? match.innerText.trim() : '';
+            const el = document.querySelector('span.fielddata, td.pagination, .pagination');
+            return el ? el.innerText.trim() : '';
         }""")
     except Exception:
         return ""
@@ -223,15 +221,19 @@ def backfill_historical_registry():
                     # Brief timeout throttle protects network session tokens
                     page.wait_for_timeout(400)
                 
-                # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
-                print("Clicking next page using Oracle APEX engine hooks...")
+                # --- FIX: TARGETING ATTRIBUTES AND TITLES ---
+                print("Clicking next page using targeted Oracle APEX engine hooks...")
                 has_next_page = winning_frame.evaluate("""() => {
                     const links = Array.from(document.querySelectorAll('a'));
-                    // Isolate Oracle APEX native report navigation function calls containing the forward token
+                    // Target the link invoking gReport.navigate where the image title matches 'Next'
                     const nextLink = links.find(l => {
                         const href = l.getAttribute('href') || '';
-                        const text = l.innerText || '';
-                        return href.includes('gReport.navigate') && (text.includes('>') || l.querySelector('img[src*="next"]') || l.querySelector('img[src*="right"]'));
+                        const text = (l.innerText || '').toLowerCase();
+                        const img = l.querySelector('img');
+                        const imgTitle = img ? (img.getAttribute('title') || img.getAttribute('alt') || '').toLowerCase() : '';
+                        
+                        return href.includes('gReport.navigate') && 
+                               (imgTitle.includes('next') || text.includes('next') || text.includes('>'));
                     });
                     if (nextLink) {
                         nextLink.click();
