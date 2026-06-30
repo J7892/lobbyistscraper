@@ -71,13 +71,37 @@ def backfill_historical_registry():
             while True:
                 print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ---")
                 
-                # Extract data layout definitions from active frame
+                # Dynamic keyword scoring harvester isolates the massive body grid over header blocks
                 matrix = winning_frame.evaluate("""() => {
                     const tables = Array.from(document.querySelectorAll('table'));
-                    let bestTable = tables.find(t => (t.innerText || '').toLowerCase().includes('registration'));
-                    if (!bestTable && tables.length > 0) {
-                        bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {table: t, rows: t.querySelectorAll('tr').length} : max, {table: null, rows: 0}).table;
+                    if (tables.length === 0) return null;
+                    
+                    let bestTable = null;
+                    let maxScore = -1;
+                    
+                    for (const table of tables) {
+                        const text = (table.innerText || '').toLowerCase();
+                        let score = 0;
+                        
+                        if (text.includes('registration')) score += 15;
+                        if (text.includes('filing')) score += 15;
+                        if (text.includes('status')) score += 10;
+                        if (text.includes('lobbyist')) score += 15;
+                        if (text.includes('organization')) score += 10;
+                        
+                        const rows = Array.from(table.querySelectorAll('tr'));
+                        if (rows.length >= 2) {
+                            const sampleCells = rows[0].querySelectorAll('th, td').length;
+                            if (sampleCells >= 4) score += 20;
+                            score += rows.length; // 500 rows yields a massive mathematical bonus
+                        }
+                        
+                        if (score > maxScore && rows.length >= 2) {
+                            maxScore = score;
+                            bestTable = table;
+                        }
                     }
+                    
                     if (!bestTable) return null;
                     
                     const trs = Array.from(bestTable.querySelectorAll('tr'));
@@ -121,15 +145,36 @@ def backfill_historical_registry():
                     pdf_text = "No tracking details extracted from profile disclosure file"
                     
                     try:
-                        # Monitor and intercept the specific async download stream link
-                        with context.expect_event("download", timeout=15000) as download_info:
-                            # FIX: Removed the 'f' prefix here and restored single brackets for native JS execution
+                        # Synchronized row click routine targeting the scored table matrix
+                        with context.expect_event("download", timeout=5000) as download_info:
                             winning_frame.evaluate("""(targetIndex) => {
                                 const tables = Array.from(document.querySelectorAll('table'));
-                                let bestTable = tables.find(t => (t.innerText || '').toLowerCase().includes('registration'));
-                                if (!bestTable && tables.length > 0) {
-                                    bestTable = tables.reduce((max, t) => t.querySelectorAll('tr').length > max.rows ? {table: t, rows: t.querySelectorAll('tr').length} : max, {table: null, rows: 0}).table;
+                                let bestTable = null;
+                                let maxScore = -1;
+                                
+                                for (const table of tables) {
+                                    const text = (table.innerText || '').toLowerCase();
+                                    let score = 0;
+                                    
+                                    if (text.includes('registration')) score += 15;
+                                    if (text.includes('filing')) score += 15;
+                                    if (text.includes('status')) score += 10;
+                                    if (text.includes('lobbyist')) score += 15;
+                                    if (text.includes('organization')) score += 10;
+                                    
+                                    const rows = Array.from(table.querySelectorAll('tr'));
+                                    if (rows.length >= 2) {
+                                        const sampleCells = rows[0].querySelectorAll('th, td').length;
+                                        if (sampleCells >= 4) score += 20;
+                                        score += rows.length;
+                                    }
+                                    
+                                    if (score > maxScore && rows.length >= 2) {
+                                        maxScore = score;
+                                        bestTable = table;
+                                    }
                                 }
+                                
                                 if (bestTable) {
                                     const trs = Array.from(bestTable.querySelectorAll('tr'));
                                     if (targetIndex < trs.length) {
@@ -163,12 +208,11 @@ def backfill_historical_registry():
                             os.remove(temp_pdf_path)
                             
                     except Exception as download_error:
-                        print(f"    * Notice: PDF conversion row download pass skipped for token {reg_token}: {str(download_error)}")
+                        print(f"    * Notice: Download skipped or timed out for token {reg_token}: {str(download_error)}")
                         pdf_text = "PDF entry data lookup skipped or document format unreadable"
                     
                     # Normalize formatting arrays before storage pushes
                     base_row_list = list(row_data)
-                    # Sync short row anomalies if links drop elements
                     while len(base_row_list) < (len(global_headers) - 1):
                         base_row_list.append("")
                     if len(base_row_list) > (len(global_headers) - 1):
@@ -183,9 +227,7 @@ def backfill_historical_registry():
                 # --- INTERACTIVE REPORT PAGINATION HANDLING ---
                 print("Checking for accessible subsequent layout pages...")
                 has_next_page = winning_frame.evaluate("""() => {
-                    // Look for common APEX pagination button layouts or images pointing right
                     const nextButtons = Array.from(document.querySelectorAll('a[title="Next"], button[title="Next"], .a-IRR-pagination-link img[src*="next"], td.a-IRR-pagination a'));
-                    // Isolate the link that explicitly handles moving forward or contains navigation text
                     const targetLink = nextButtons.find(el => el.innerText.includes('>') || el.getAttribute('title') === 'Next' || el.outerHTML.toLowerCase().includes('next'));
                     if (targetLink) {
                         targetLink.click();
@@ -212,7 +254,6 @@ def backfill_historical_registry():
             print(f"\nCompiling dataset baseline containing {len(all_collected_records)} parsed elements...")
             historical_df = pd.DataFrame(all_collected_records, columns=global_headers)
             
-            # Strip functional structural metadata labels before writing files
             cleaned_cols = [c for c in historical_df.columns if "COLUMN_" in c or "VIEW" in c]
             if cleaned_cols:
                 historical_df = historical_df.drop(columns=cleaned_cols)
