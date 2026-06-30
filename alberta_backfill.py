@@ -1,6 +1,6 @@
 """
 alberta_backfill.py
-High-speed comprehensive historical registry crawler using the 500-row matrix layout view.
+Comprehensive historical registry crawler with Frontier Skip-Scanning and automatic session caps.
 """
 import os
 import signal
@@ -28,18 +28,21 @@ def get_pagination_text(frame):
         return ""
 
 def backfill_historical_registry():
-    print("Initializing high-speed 500-row archive backfill pipeline...")
+    print("Initializing frame-piercing Frontier Skip-Scanning pipeline...")
     
     # Configure Unix alarm signal for synchronous execution timeouts
     signal.signal(signal.SIGALRM, timeout_handler)
     
-    # Clean up previous broken files to guarantee clean structural execution
-    if os.path.exists(HISTORICAL_DATA_FILE):
+    # Load previously processed records to enable intelligent skip-scanning fast-forwarding
+    existing_tokens = set()
+    if os.path.exists(HISTORICAL_DATA_FILE) and os.path.getsize(HISTORICAL_DATA_FILE) > 0:
         try:
-            os.remove(HISTORICAL_DATA_FILE)
-            print("Wiped old backfill baseline to establish a clean data schema.")
-        except Exception:
-            pass
+            existing_df = pd.read_csv(HISTORICAL_DATA_FILE)
+            if "REGISTRATION NUMBER" in existing_df.columns:
+                existing_tokens = set(existing_df["REGISTRATION NUMBER"].astype(str).tolist())
+            print(f"[RESUME] Found existing archive tracking file. Loaded {len(existing_tokens)} unique keys.")
+        except Exception as e:
+            print(f"Note: Could not parse existing historical data tracking sheet ({str(e)}). Starting fresh.")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -51,6 +54,9 @@ def backfill_historical_registry():
         
         global_headers = None
         page_number = 1
+        fresh_pages_processed = 0
+        # Safe protective threshold: process a maximum of 40 new pages per script execution
+        MAX_FRESH_PAGES_PER_RUN = 40 
         
         try:
             print(f"Navigating to base endpoint: {BASE_URL}")
@@ -75,25 +81,14 @@ def backfill_historical_registry():
                     continue
                     
             if not winning_frame:
-                print("Fatal Error: Could not locate primary database table frame wrappers.")
+                print("Fatal Error: Could not locate the primary database iframe wrapper context.")
                 browser.close()
                 return
-
-            # --- EXPLOITING THE 500 ROW SELECTION DROPDOWN NATIVELY ---
-            print("Locating the rows-per-page dropdown menu element...")
-            try:
-                # Use native Playwright interactions to simulate an authentic user choice
-                row_dropdown = winning_frame.locator("select[title='Rows Per Page'], select.a-IRR-select, select").first
-                row_dropdown.select_option("500")
-                print("Dropdown updated to 500 rows. Waiting 20 seconds for full AJAX database layout construction...")
-                page.wait_for_timeout(20000)
-            except Exception as select_err:
-                print(f"Warning: Playwright native selection dropdown hit an anomaly: {str(select_err)}. Proceeding with fallback.")
 
             # Main sequential pagination loop execution track
             while True:
                 current_pagination_state = get_pagination_text(winning_frame)
-                print(f"\n--- PROCESSING DATA CHUNK: PAGE {page_number} ({current_pagination_state}) ---")
+                print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
                 
                 # Dynamic keyword scoring harvester isolates the core data matrix rows
                 matrix = winning_frame.evaluate("""() => {
@@ -135,7 +130,7 @@ def backfill_historical_registry():
                 }""")
                 
                 if not matrix or len(matrix) < 2:
-                    print("No active data container rows found on this page layout. Closing sweep sequence.")
+                    print("No data matrix found on this page slice. Ending crawl loop.")
                     break
                     
                 # Align structural table column tags
@@ -154,124 +149,118 @@ def backfill_historical_registry():
                     reg_num_idx = 0
                 
                 rows_in_batch = len(matrix) - data_start_idx
-                print(f"Successfully isolated {rows_in_batch} records on active page block. Beginning batch PDF processing...")
                 
-                page_records = []
-                
-                # Execute sequential row-by-row clicks inside the current page view
+                # --- FRONTIER ACCELERATION PRE-CHECK ---
+                page_tokens = []
                 for idx in range(data_start_idx, len(matrix)):
                     row_data = matrix[idx]
-                    if not any(row_data):
-                        continue
+                    if len(row_data) > reg_num_idx:
+                        page_tokens.append(str(row_data[reg_num_idx]))
+                
+                # If all records on this specific page are already present in our CSV, skip execution completely
+                if page_tokens and all(tok in existing_tokens for tok in page_tokens):
+                    print(f" >> [FAST-FORWARD] All {len(page_tokens)} records on Page {page_number} already cached. Skimming page link...")
+                else:
+                    # We have arrived at the unindexed frontier boundary text items
+                    print(f" Isolated {rows_in_batch} records on page {page_number}. Syncing disclosure PDFs...")
+                    page_records = []
+                    
+                    for idx in range(data_start_idx, len(matrix)):
+                        row_data = matrix[idx]
+                        if not any(row_data):
+                            continue
+                            
+                        reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
+                        current_item_num = idx - data_start_idx + 1
                         
-                    reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
-                    current_item_num = idx - data_start_idx + 1
-                    
-                    if current_item_num % 25 == 0 or current_item_num == 1:
-                        print(f" -> Progress Status [{current_item_num}/{rows_in_batch}]: Extracting text from disclosure token: {reg_token}")
-                    
-                    pdf_text = "No tracking details extracted from profile disclosure file"
-                    
-                    try:
-                        # Synchronized row click routine targeting the scored table matrix
-                        with context.expect_event("download", timeout=6000) as download_info:
-                            winning_frame.evaluate("""(targetIndex) => {
-                                const tables = Array.from(document.querySelectorAll('table'));
-                                let bestTable = null;
-                                let maxScore = -1;
-                                
-                                for (const table of tables) {
-                                    const text = (table.innerText || '').toLowerCase();
-                                    let score = 0;
-                                    
-                                    if (text.includes('registration')) score += 15;
-                                    if (text.includes('filing')) score += 15;
-                                    if (text.includes('status')) score += 10;
-                                    if (text.includes('lobbyist')) score += 15;
-                                    if (text.includes('organization')) score += 10;
-                                    
-                                    const rows = Array.from(table.querySelectorAll('tr'));
-                                    if (rows.length >= 2) {
-                                        const sampleCells = rows[0].querySelectorAll('th, td').length;
-                                        if (sampleCells >= 4) score += 20;
-                                        score += rows.length;
+                        if str(reg_token) in existing_tokens:
+                            print(f"  -> [{current_item_num}/{rows_in_batch}] Key {reg_token} cached. Skipping loop.")
+                            continue
+                            
+                        print(f"  -> [{current_item_num}/{rows_in_batch}] Extracting text details for frontier item: {reg_token}")
+                        pdf_text = "No tracking details extracted from profile disclosure file"
+                        
+                        try:
+                            with context.expect_event("download", timeout=5000) as download_info:
+                                winning_frame.evaluate("""(targetIndex) => {
+                                    const tables = Array.from(document.querySelectorAll('table'));
+                                    let bestTable = null; let maxScore = -1;
+                                    for (const table of tables) {
+                                        const text = (table.innerText || '').toLowerCase();
+                                        let score = 0; if (text.includes('registration')) score += 15;
+                                        const rows = Array.from(table.querySelectorAll('tr'));
+                                        if (rows.length >= 2) score += rows.length;
+                                        if (score > maxScore && rows.length >= 2) { maxScore = score; bestTable = table; }
                                     }
-                                    
-                                    if (score > maxScore && rows.length >= 2) {
-                                        maxScore = score;
-                                        bestTable = table;
-                                    }
-                                }
-                                
-                                if (bestTable) {
-                                    const trs = Array.from(bestTable.querySelectorAll('tr'));
-                                    if (targetIndex < trs.length) {
-                                        const cells = trs[targetIndex].querySelectorAll('td');
-                                        if (cells.length > 0) {
-                                            const finalCell = cells[cells.length - 1];
-                                            const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
-                                            activationNode.click();
+                                    if (bestTable) {
+                                        const trs = Array.from(bestTable.querySelectorAll('tr'));
+                                        if (targetIndex < trs.length) {
+                                            const cells = trs[targetIndex].querySelectorAll('td');
+                                            if (cells.length > 0) {
+                                                const finalCell = cells[cells.length - 1];
+                                                const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
+                                                activationNode.click();
+                                            }
                                         }
                                     }
-                                }
-                            }""", idx)
+                                }""", idx)
+                                
+                            download = download_info.value
+                            temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
+                            download.save_as(temp_pdf_path)
                             
-                        download = download_info.value
-                        temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
-                        download.save_as(temp_pdf_path)
+                            signal.alarm(8)
+                            try:
+                                from pypdf import PdfReader
+                                reader = PdfReader(temp_pdf_path)
+                                text_accumulator = []
+                                for individual_page in reader.pages:
+                                    page_content = individual_page.extract_text()
+                                    if page_content:
+                                        text_accumulator.append(page_content)
+                                        
+                                if text_accumulator:
+                                    pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
+                            except TimeoutException:
+                                pdf_text = "PDF processing time limit exceeded - raw text unindexed"
+                            finally:
+                                signal.alarm(0)
+                                
+                            if os.path.exists(temp_pdf_path):
+                                os.remove(temp_pdf_path)
+                                
+                        except Exception as download_error:
+                            pdf_text = f"PDF Sync Skipped or download timed out: {str(download_error)}"
                         
-                        # Process target binary text contents with a strict 8-second execution timeout guard
-                        signal.alarm(8)
-                        try:
-                            from pypdf import PdfReader
-                            reader = PdfReader(temp_pdf_path)
-                            text_accumulator = []
-                            for individual_page in reader.pages:
-                                page_content = individual_page.extract_text()
-                                if page_content:
-                                    text_accumulator.append(page_content)
-                                    
-                            if text_accumulator:
-                                pdf_text = " ".join(text_accumulator).replace("\n", " ").strip()
-                        except TimeoutException:
-                            pdf_text = "PDF processing time limit exceeded - raw text unindexed"
-                        finally:
-                            signal.alarm(0) # Reset Unix timer trigger
+                        base_row_list = list(row_data)
+                        while len(base_row_list) < (len(global_headers) - 1):
+                            base_row_list.append("")
+                        if len(base_row_list) > (len(global_headers) - 1):
+                            base_row_list = base_row_list[:len(global_headers) - 1]
                             
-                        if os.path.exists(temp_pdf_path):
-                            os.remove(temp_pdf_path)
-                            
-                    except Exception as download_error:
-                        pdf_text = f"PDF Entry skipped or download timed out: {str(download_error)}"
+                        extended_record = base_row_list + [pdf_text]
+                        page_records.append(extended_record)
+                        page.wait_for_timeout(400)
                     
-                    # Normalize formatting arrays before storage pushes
-                    base_row_list = list(row_data)
-                    while len(base_row_list) < (len(global_headers) - 1):
-                        base_row_list.append("")
-                    if len(base_row_list) > (len(global_headers) - 1):
-                        base_row_list = base_row_list[:len(global_headers) - 1]
+                    if page_records:
+                        chunk_df = pd.DataFrame(page_records, columns=global_headers)
+                        cleaned_cols = [c for c in chunk_df.columns if "COLUMN_" in c or "VIEW" in c]
+                        if cleaned_cols:
+                            chunk_df = chunk_df.drop(columns=cleaned_cols)
                         
-                    extended_record = base_row_list + [pdf_text]
-                    page_records.append(extended_record)
+                        if not os.path.exists(HISTORICAL_DATA_FILE):
+                            chunk_df.to_csv(HISTORICAL_DATA_FILE, index=False)
+                        else:
+                            chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
+                        print(f"[CHECKPOINT] Saved Page {page_number} data additions to ledger file.")
                     
-                    # Safe brief throttling prevents database rate-limiting
-                    page.wait_for_timeout(350)
-                
-                # Checkpoint Write: Append the entire 500-row batch directly to disk
-                if page_records:
-                    chunk_df = pd.DataFrame(page_records, columns=global_headers)
-                    cleaned_cols = [c for c in chunk_df.columns if "COLUMN_" in c or "VIEW" in c]
-                    if cleaned_cols:
-                        chunk_df = chunk_df.drop(columns=cleaned_cols)
-                    
-                    if not os.path.exists(HISTORICAL_DATA_FILE):
-                        chunk_df.to_csv(HISTORICAL_DATA_FILE, index=False)
-                    else:
-                        chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
-                    print(f"[CHECKPOINT] Successfully committed {len(chunk_df)} records from Page {page_number} to disk.")
+                    fresh_pages_processed += 1
+                    if fresh_pages_processed >= MAX_FRESH_PAGES_PER_RUN:
+                        print(f"\n[SYSTEM] Reached maximum processing threshold allotment ({MAX_FRESH_PAGES_PER_RUN} fresh pages).")
+                        print("Exiting cleanly to execute checkpoint auto-commits and protect runner memory footprint constraints.")
+                        break
                 
                 # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
-                print("Checking for subsequent 500-row page layouts...")
                 has_next_page = winning_frame.evaluate("""() => {
                     const links = Array.from(document.querySelectorAll('a'));
                     const nextLink = links.find(l => {
@@ -291,11 +280,14 @@ def backfill_historical_registry():
                 }""")
                 
                 if has_next_page:
-                    print("Next 500-row batch action fired. Waiting 20 seconds for page allocation...")
                     page_number += 1
-                    page.wait_for_timeout(20000)
+                    for check_attempt in range(30):
+                        page.wait_for_timeout(500)
+                        updated_pagination_state = get_pagination_text(winning_frame)
+                        if updated_pagination_state != current_pagination_state and updated_pagination_state != "":
+                            break
                 else:
-                    print("No further data blocks found. Archive backfill fully complete.")
+                    print("No subsequent data blocks found. Archive backfill fully complete!")
                     break
                     
         except Exception as pipeline_fault:
