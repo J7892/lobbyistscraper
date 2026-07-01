@@ -1,6 +1,6 @@
 """
 alberta_backfill.py
-Comprehensive historical registry crawler with Frontier Skip-Scanning and automatic session caps.
+Comprehensive historical registry crawler with Frontier Skip-Scanning and Token-Based Matching.
 """
 import os
 import signal
@@ -55,7 +55,6 @@ def backfill_historical_registry():
         global_headers = None
         page_number = 1
         fresh_pages_processed = 0
-        # Safe protective threshold: process a maximum of 40 new pages per script execution
         MAX_FRESH_PAGES_PER_RUN = 40 
         
         try:
@@ -90,7 +89,6 @@ def backfill_historical_registry():
                 current_pagination_state = get_pagination_text(winning_frame)
                 print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
                 
-                # Dynamic keyword scoring harvester isolates the core data matrix rows
                 matrix = winning_frame.evaluate("""() => {
                     const tables = Array.from(document.querySelectorAll('table'));
                     if (tables.length === 0) return null;
@@ -161,49 +159,52 @@ def backfill_historical_registry():
                 if page_tokens and all(tok in existing_tokens for tok in page_tokens):
                     print(f" >> [FAST-FORWARD] All {len(page_tokens)} records on Page {page_number} already cached. Skimming page link...")
                 else:
-                    # We have arrived at the unindexed frontier boundary text items
                     print(f" Isolated {rows_in_batch} records on page {page_number}. Syncing disclosure PDFs...")
                     page_records = []
                     
                     for idx in range(data_start_idx, len(matrix)):
-                        row_data = matrix[idx]
-                        if not any(row_data):
+                        raw_row_data = matrix[idx]
+                        row_data = [str(cell).replace("\n", " ").replace("\t", " ").strip() for cell in raw_row_data]
+                        
+                        if not any(row_data) or len(row_data) <= reg_num_idx:
                             continue
                             
-                        reg_token = row_data[reg_num_idx] if reg_num_idx < len(row_data) else f"token_{page_number}_{idx}"
-                        current_item_num = idx - data_start_idx + 1
+                        combined_row_text = "".join(row_data).upper()
+                        if "FILING DATE" in combined_row_text or "1 - 15 OF" in combined_row_text or "VIEW" == row_data[0]:
+                            continue
+                            
+                        reg_token = str(row_data[reg_num_idx])
+                        if not reg_token or "REGISTRATION" in reg_token.upper():
+                            continue
                         
                         if str(reg_token) in existing_tokens:
-                            print(f"  -> [{current_item_num}/{rows_in_batch}] Key {reg_token} cached. Skipping loop.")
+                            print(f"  -> [{idx}/{rows_in_batch}] Key {reg_token} cached. Skipping loop.")
                             continue
                             
-                        print(f"  -> [{current_item_num}/{rows_in_batch}] Extracting text details for frontier item: {reg_token}")
+                        print(f"  -> [{idx}/{rows_in_batch}] Extracting text details for frontier item: {reg_token}")
                         pdf_text = "No tracking details extracted from profile disclosure file"
                         
                         try:
                             with context.expect_event("download", timeout=5000) as download_info:
-                                winning_frame.evaluate("""(targetIndex) => {
+                                # TOKEN-BASED MATCHING: Locates the cell matching the exact registration identifier text string
+                                winning_frame.evaluate("""(regNum) => {
                                     const tables = Array.from(document.querySelectorAll('table'));
-                                    let bestTable = null; let maxScore = -1;
                                     for (const table of tables) {
-                                        const text = (table.innerText || '').toLowerCase();
-                                        let score = 0; if (text.includes('registration')) score += 15;
-                                        const rows = Array.from(table.querySelectorAll('tr'));
-                                        if (rows.length >= 2) score += rows.length;
-                                        if (score > maxScore && rows.length >= 2) { maxScore = score; bestTable = table; }
-                                    }
-                                    if (bestTable) {
-                                        const trs = Array.from(bestTable.querySelectorAll('tr'));
-                                        if (targetIndex < trs.length) {
-                                            const cells = trs[targetIndex].querySelectorAll('td');
-                                            if (cells.length > 0) {
-                                                const finalCell = cells[cells.length - 1];
-                                                const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
-                                                activationNode.click();
+                                        const trs = Array.from(table.querySelectorAll('tr'));
+                                        for (const tr of trs) {
+                                            if (tr.innerText.includes(regNum)) {
+                                                const cells = tr.querySelectorAll('td');
+                                                if (cells.length > 0) {
+                                                    const finalCell = cells[cells.length - 1];
+                                                    const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
+                                                    activationNode.click();
+                                                    return true;
+                                                }
                                             }
                                         }
                                     }
-                                }""", idx)
+                                    return false;
+                                }""", str(reg_token))
                                 
                             download = download_info.value
                             temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
