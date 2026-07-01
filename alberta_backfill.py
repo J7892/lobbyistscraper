@@ -1,6 +1,7 @@
 """
 alberta_backfill.py
 Comprehensive historical registry crawler with Token-Based Matching and Stateful Synchronization Locks.
+Enhanced with Token-Based Page Turn Verification to prevent fast-forward AJAX race conditions.
 """
 import os
 import signal
@@ -21,8 +22,28 @@ def get_pagination_text(frame):
     """Extracts the active row boundaries text to monitor AJAX updates safely."""
     try:
         return frame.evaluate("""() => {
-            const el = document.querySelector('span.fielddata, td.pagination, .pagination');
-            return el ? el.innerText.trim() : '';
+            // Highly thorough selector suite targeting Oracle APEX pagination indicators
+            const selectors = [
+                '.a-IRR-pagination-label',
+                '.a-IRR-pagination',
+                'span.fielddata',
+                'td.pagination',
+                '.pagination'
+            ];
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el && el.innerText.trim()) return el.innerText.trim();
+            }
+            
+            // Text node backup parser
+            const elements = Array.from(document.querySelectorAll('td, span, div'));
+            for (const el of elements) {
+                const text = el.innerText || '';
+                if (text.includes(' - ') && text.toLowerCase().includes(' of ')) {
+                    return text.trim();
+                }
+            }
+            return '';
         }""")
     except Exception:
         return ""
@@ -57,6 +78,9 @@ def backfill_historical_registry():
         fresh_pages_processed = 0
         MAX_FRESH_PAGES_PER_RUN = 40 
         
+        last_first_token = None
+        stale_page_retries = 0
+        
         try:
             print(f"Navigating to base endpoint: {BASE_URL}")
             page.goto(BASE_URL, wait_until="networkidle")
@@ -85,9 +109,6 @@ def backfill_historical_registry():
 
             # Main sequential pagination loop execution track
             while True:
-                current_pagination_state = get_pagination_text(winning_frame)
-                print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
-                
                 matrix = winning_frame.evaluate("""() => {
                     const tables = Array.from(document.querySelectorAll('table'));
                     if (tables.length === 0) return null;
@@ -143,6 +164,32 @@ def backfill_historical_registry():
                     reg_num_idx = global_headers.index("REGISTRATION NUMBER")
                 except ValueError:
                     reg_num_idx = 0
+                
+                # Extract the very first valid token on the current page to verify true page turns
+                this_page_first_token = None
+                for idx in range(data_start_idx, len(matrix)):
+                    raw_row_data = matrix[idx]
+                    row_data = [str(cell).replace("\n", " ").replace("\t", " ").strip() for cell in raw_row_data]
+                    if len(row_data) > reg_num_idx:
+                        token_candidate = str(row_data[reg_num_idx])
+                        if token_candidate and "REGISTRATION" not in token_candidate.upper():
+                            this_page_first_token = token_candidate
+                            break
+
+                # TOKEN-BASED VERIFICATION: If the browser didn't actually swap data pages yet, pause and retry
+                if last_first_token and this_page_first_token == last_first_token:
+                    stale_page_retries += 1
+                    if stale_page_retries > 10:
+                        print(" [FATAL] Pagination event failed to shift browser DOM data stream. Breaking to preserve checkpoints.")
+                        break
+                    print(f" >> [AJAX DELAY] DOM matches previous page data state. Waiting for interface update (Attempt {stale_page_retries}/10)...")
+                    page.wait_for_timeout(1500)
+                    continue
+                
+                # Reset page state change verification tracking markers
+                stale_page_retries = 0
+                current_pagination_state = get_pagination_text(winning_frame)
+                print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
                 
                 valid_rows_to_process = []
                 contains_new_records = False
@@ -242,7 +289,6 @@ def backfill_historical_registry():
                         page_records.append(extended_record)
                         
                         # Add a deliberate 1.5-second hard session cool-down.
-                        # This clears the server's binary session cache before moving to the next row token.
                         page.wait_for_timeout(1500)
                     
                     if page_records:
@@ -262,17 +308,28 @@ def backfill_historical_registry():
                         print(f"\n[SYSTEM] Reached maximum processing threshold allotment ({MAX_FRESH_PAGES_PER_RUN} fresh pages).")
                         break
                 
+                # Cache current first-row tracking identity before moving pagination structures forward
+                if this_page_first_token:
+                    last_first_token = this_page_first_token
+                
                 # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
                 has_next_page = winning_frame.evaluate("""() => {
+                    // Modern direct target priority match selector
+                    const apexNextBtn = document.querySelector('button[data-pagination="next"], .a-IRR-button--pagination[title*="Next"]');
+                    if (apexNextBtn) {
+                        apexNextBtn.click();
+                        return true;
+                    }
+
                     const links = Array.from(document.querySelectorAll('a'));
                     const nextLink = links.find(l => {
                         const href = l.getAttribute('href') || '';
-                        const text = (l.innerText || '').toLowerCase();
+                        const text = (l.innerText || '').trim().toLowerCase();
                         const img = l.querySelector('img');
                         const imgTitle = img ? (img.getAttribute('title') || img.getAttribute('alt') || '').toLowerCase() : '';
                         
                         return href.includes('gReport.navigate') && 
-                               (imgTitle.includes('next') || text.includes('next') || text.includes('>'));
+                               (text === '>' || text === 'next' || imgTitle.includes('next'));
                     });
                     if (nextLink) {
                         nextLink.click();
@@ -283,11 +340,7 @@ def backfill_historical_registry():
                 
                 if has_next_page:
                     page_number += 1
-                    for check_attempt in range(30):
-                        page.wait_for_timeout(500)
-                        updated_pagination_state = get_pagination_text(winning_frame)
-                        if updated_pagination_state != current_pagination_state and updated_pagination_state != "":
-                            break
+                    page.wait_for_timeout(1000) # Fast base delay to allow AJAX transmission initialization
                 else:
                     print("No subsequent data blocks found. Archive backfill fully complete!")
                     break
