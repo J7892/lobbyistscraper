@@ -1,6 +1,6 @@
 """
 alberta_backfill.py
-Comprehensive historical registry crawler with Frontier Skip-Scanning and Token-Based Matching.
+Comprehensive historical registry crawler with Token-Based Matching and Stateful Synchronization Locks.
 """
 import os
 import signal
@@ -28,7 +28,7 @@ def get_pagination_text(frame):
         return ""
 
 def backfill_historical_registry():
-    print("Initializing frame-piercing Frontier Skip-Scanning pipeline...")
+    print("Initializing frame-piercing Frontier Skip-Scanning pipeline with Stateful Synchronous Locking...")
     
     # Configure Unix alarm signal for synchronous execution timeouts
     signal.signal(signal.SIGALRM, timeout_handler)
@@ -69,7 +69,6 @@ def backfill_historical_registry():
             page.locator("input#Search").click()
             page.wait_for_timeout(10000)
             
-            # Locate the winning data iframe wrapper context
             winning_frame = None
             for frame in page.frames:
                 try:
@@ -131,7 +130,6 @@ def backfill_historical_registry():
                     print("No data matrix found on this page slice. Ending crawl loop.")
                     break
                     
-                # Align structural table column tags
                 header_row = [str(cell).strip().upper() for cell in matrix[0]]
                 is_header = any("REGISTRATION" in col or "FILING" in col for col in header_row)
                 data_start_idx = 1 if is_header else 0
@@ -146,7 +144,6 @@ def backfill_historical_registry():
                 except ValueError:
                     reg_num_idx = 0
                 
-                # --- SANITIZE AND MAP VALID DATA ROWS ---
                 valid_rows_to_process = []
                 contains_new_records = False
                 
@@ -169,13 +166,11 @@ def backfill_historical_registry():
                     if reg_token not in existing_tokens:
                         contains_new_records = True
 
-                # --- DECIDE ACTION BASED ON VALIDATED FRONTIER CONTENT ---
                 if not valid_rows_to_process:
                     print(f" >> Page {page_number} contains only layout noise. Fast-forwarding link...")
                 elif not contains_new_records:
                     print(f" >> [FAST-FORWARD] All {len(valid_rows_to_process)} records on Page {page_number} already cached. Skimming page...")
                 else:
-                    # We have located active unindexed territory
                     print(f" Isolated {len(valid_rows_to_process)} records on page {page_number}. Syncing unindexed targets...")
                     page_records = []
                     
@@ -188,7 +183,8 @@ def backfill_historical_registry():
                         pdf_text = "No tracking details extracted from profile disclosure file"
                         
                         try:
-                            with context.expect_event("download", timeout=5000) as download_info:
+                            # STATEFUL SYNCHRONIZATION LOCK: Binds the explicit download event channel before firing clicks
+                            with context.expect_event("download", timeout=7000) as download_info:
                                 winning_frame.evaluate("""(regNum) => {
                                     const tables = Array.from(document.querySelectorAll('table'));
                                     for (const table of tables) {
@@ -208,6 +204,7 @@ def backfill_historical_registry():
                                     return false;
                                 }""", str(reg_token))
                                 
+                            # HALT EXECUTION: Wait explicitly for operating system disk write sync confirmation
                             download = download_info.value
                             temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
                             download.save_as(temp_pdf_path)
@@ -243,7 +240,10 @@ def backfill_historical_registry():
                             
                         extended_record = base_row_list + [pdf_text]
                         page_records.append(extended_record)
-                        page.wait_for_timeout(400)
+                        
+                        # Add a deliberate 1.5-second hard session cool-down.
+                        # This clears the server's binary session cache before moving to the next row token.
+                        page.wait_for_timeout(1500)
                     
                     if page_records:
                         chunk_df = pd.DataFrame(page_records, columns=global_headers)
@@ -257,7 +257,6 @@ def backfill_historical_registry():
                             chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
                         print(f"[CHECKPOINT] Saved Page {page_number} data additions to ledger file.")
                     
-                    # Budget is only charged when we actively download from a frontier page view
                     fresh_pages_processed += 1
                     if fresh_pages_processed >= MAX_FRESH_PAGES_PER_RUN:
                         print(f"\n[SYSTEM] Reached maximum processing threshold allotment ({MAX_FRESH_PAGES_PER_RUN} fresh pages).")
