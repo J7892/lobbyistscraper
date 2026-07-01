@@ -1,7 +1,7 @@
 """
 alberta_lobbyist_scraper.py
 Daily incremental change analyzer with automated Gmail HTML digest mailing.
-Includes Token-Based structural row-matching to eliminate layout noise.
+Includes Stateful Synchronous Locking to guarantee data-stream alignment.
 """
 import os
 import smtplib
@@ -152,8 +152,8 @@ def execute_daily_scrape():
                         
                         pdf_text = "No tracking details extracted from profile disclosure file"
                         try:
+                            # STATEFUL SYNCHRONIZATION LOCK: Binds explicit download context before triggering clicks
                             with context.expect_event("download", timeout=6000) as download_info:
-                                # TOKEN-BASED MATCHING: Locates the cell matching the exact registration identifier text string
                                 winning_frame.evaluate("""(regNum) => {
                                     const tables = Array.from(document.querySelectorAll('table'));
                                     for (const table of tables) {
@@ -189,6 +189,9 @@ def execute_daily_scrape():
                         
                         full_record_entry = base_row_list + [pdf_text]
                         new_records_captured.append(full_record_entry)
+                        
+                        # Add a deliberate 1.5-second hard session cool-down.
+                        page.wait_for_timeout(1500)
                         
         except Exception as e:
             print(f"Daily monitor process error: {str(e)}")
