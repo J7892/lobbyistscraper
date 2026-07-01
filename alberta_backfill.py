@@ -146,47 +146,49 @@ def backfill_historical_registry():
                 except ValueError:
                     reg_num_idx = 0
                 
-                rows_in_batch = len(matrix) - data_start_idx
+                # --- SANITIZE AND MAP VALID DATA ROWS ---
+                valid_rows_to_process = []
+                contains_new_records = False
                 
-                # --- FRONTIER ACCELERATION PRE-CHECK ---
-                page_tokens = []
                 for idx in range(data_start_idx, len(matrix)):
-                    row_data = matrix[idx]
-                    if len(row_data) > reg_num_idx:
-                        page_tokens.append(str(row_data[reg_num_idx]))
-                
-                # If all records on this specific page are already present in our CSV, skip execution completely
-                if page_tokens and all(tok in existing_tokens for tok in page_tokens):
-                    print(f" >> [FAST-FORWARD] All {len(page_tokens)} records on Page {page_number} already cached. Skimming page link...")
+                    raw_row_data = matrix[idx]
+                    row_data = [str(cell).replace("\n", " ").replace("\t", " ").strip() for cell in raw_row_data]
+                    
+                    if not any(row_data) or len(row_data) <= reg_num_idx:
+                        continue
+                        
+                    combined_row_text = "".join(row_data).upper()
+                    if "FILING DATE" in combined_row_text or "1 - 15 OF" in combined_row_text or "VIEW" == row_data[0]:
+                        continue
+                        
+                    reg_token = str(row_data[reg_num_idx])
+                    if not reg_token or "REGISTRATION" in reg_token.upper():
+                        continue
+                        
+                    valid_rows_to_process.append((row_data, reg_token))
+                    if reg_token not in existing_tokens:
+                        contains_new_records = True
+
+                # --- DECIDE ACTION BASED ON VALIDATED FRONTIER CONTENT ---
+                if not valid_rows_to_process:
+                    print(f" >> Page {page_number} contains only layout noise. Fast-forwarding link...")
+                elif not contains_new_records:
+                    print(f" >> [FAST-FORWARD] All {len(valid_rows_to_process)} records on Page {page_number} already cached. Skimming page...")
                 else:
-                    print(f" Isolated {rows_in_batch} records on page {page_number}. Syncing disclosure PDFs...")
+                    # We have located active unindexed territory
+                    print(f" Isolated {len(valid_rows_to_process)} records on page {page_number}. Syncing unindexed targets...")
                     page_records = []
                     
-                    for idx in range(data_start_idx, len(matrix)):
-                        raw_row_data = matrix[idx]
-                        row_data = [str(cell).replace("\n", " ").replace("\t", " ").strip() for cell in raw_row_data]
-                        
-                        if not any(row_data) or len(row_data) <= reg_num_idx:
+                    for row_data, reg_token in valid_rows_to_process:
+                        if reg_token in existing_tokens:
+                            print(f"  -> [{reg_token}] already cached in ledger.")
                             continue
                             
-                        combined_row_text = "".join(row_data).upper()
-                        if "FILING DATE" in combined_row_text or "1 - 15 OF" in combined_row_text or "VIEW" == row_data[0]:
-                            continue
-                            
-                        reg_token = str(row_data[reg_num_idx])
-                        if not reg_token or "REGISTRATION" in reg_token.upper():
-                            continue
-                        
-                        if str(reg_token) in existing_tokens:
-                            print(f"  -> [{idx}/{rows_in_batch}] Key {reg_token} cached. Skipping loop.")
-                            continue
-                            
-                        print(f"  -> [{idx}/{rows_in_batch}] Extracting text details for frontier item: {reg_token}")
+                        print(f"  -> Extracting text details for frontier item: {reg_token}")
                         pdf_text = "No tracking details extracted from profile disclosure file"
                         
                         try:
                             with context.expect_event("download", timeout=5000) as download_info:
-                                # TOKEN-BASED MATCHING: Locates the cell matching the exact registration identifier text string
                                 winning_frame.evaluate("""(regNum) => {
                                     const tables = Array.from(document.querySelectorAll('table'));
                                     for (const table of tables) {
@@ -255,10 +257,10 @@ def backfill_historical_registry():
                             chunk_df.to_csv(HISTORICAL_DATA_FILE, mode='a', header=False, index=False)
                         print(f"[CHECKPOINT] Saved Page {page_number} data additions to ledger file.")
                     
+                    # Budget is only charged when we actively download from a frontier page view
                     fresh_pages_processed += 1
                     if fresh_pages_processed >= MAX_FRESH_PAGES_PER_RUN:
                         print(f"\n[SYSTEM] Reached maximum processing threshold allotment ({MAX_FRESH_PAGES_PER_RUN} fresh pages).")
-                        print("Exiting cleanly to execute checkpoint auto-commits and protect runner memory footprint constraints.")
                         break
                 
                 # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
