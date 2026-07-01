@@ -1,7 +1,7 @@
 """
 alberta_backfill.py
 Comprehensive historical registry crawler with Token-Based Matching and Stateful Synchronization Locks.
-Enhanced with Token-Based Page Turn Verification to prevent fast-forward AJAX race conditions.
+Enhanced with Leaf-Node Direct Cell Matching to prevent container table click shifting.
 """
 import os
 import signal
@@ -22,7 +22,6 @@ def get_pagination_text(frame):
     """Extracts the active row boundaries text to monitor AJAX updates safely."""
     try:
         return frame.evaluate("""() => {
-            // Highly thorough selector suite targeting Oracle APEX pagination indicators
             const selectors = [
                 '.a-IRR-pagination-label',
                 '.a-IRR-pagination',
@@ -35,7 +34,6 @@ def get_pagination_text(frame):
                 if (el && el.innerText.trim()) return el.innerText.trim();
             }
             
-            // Text node backup parser
             const elements = Array.from(document.querySelectorAll('td, span, div'));
             for (const el of elements) {
                 const text = el.innerText || '';
@@ -49,7 +47,7 @@ def get_pagination_text(frame):
         return ""
 
 def backfill_historical_registry():
-    print("Initializing frame-piercing Frontier Skip-Scanning pipeline with Stateful Synchronous Locking...")
+    print("Initializing frame-piercing Frontier Skip-Scanning pipeline with Leaf-Node Synchronous Locking...")
     
     # Configure Unix alarm signal for synchronous execution timeouts
     signal.signal(signal.SIGALRM, timeout_handler)
@@ -165,7 +163,6 @@ def backfill_historical_registry():
                 except ValueError:
                     reg_num_idx = 0
                 
-                # Extract the very first valid token on the current page to verify true page turns
                 this_page_first_token = None
                 for idx in range(data_start_idx, len(matrix)):
                     raw_row_data = matrix[idx]
@@ -176,7 +173,6 @@ def backfill_historical_registry():
                             this_page_first_token = token_candidate
                             break
 
-                # TOKEN-BASED VERIFICATION: If the browser didn't actually swap data pages yet, pause and retry
                 if last_first_token and this_page_first_token == last_first_token:
                     stale_page_retries += 1
                     if stale_page_retries > 10:
@@ -186,7 +182,6 @@ def backfill_historical_registry():
                     page.wait_for_timeout(1500)
                     continue
                 
-                # Reset page state change verification tracking markers
                 stale_page_retries = 0
                 current_pagination_state = get_pagination_text(winning_frame)
                 print(f"\n--- SCANNING DATA GRID: PAGE {page_number} ({current_pagination_state}) ---")
@@ -230,28 +225,30 @@ def backfill_historical_registry():
                         pdf_text = "No tracking details extracted from profile disclosure file"
                         
                         try:
-                            # STATEFUL SYNCHRONIZATION LOCK: Binds the explicit download event channel before firing clicks
+                            # STATEFUL SYNCHRONIZATION LOCK paired with isolated Leaf-Node matching logic
                             with context.expect_event("download", timeout=7000) as download_info:
                                 winning_frame.evaluate("""(regNum) => {
-                                    const tables = Array.from(document.querySelectorAll('table'));
-                                    for (const table of tables) {
-                                        const trs = Array.from(table.querySelectorAll('tr'));
-                                        for (const tr of trs) {
-                                            if (tr.innerText.includes(regNum)) {
-                                                const cells = tr.querySelectorAll('td');
-                                                if (cells.length > 0) {
-                                                    const finalCell = cells[cells.length - 1];
-                                                    const activationNode = finalCell.querySelector('a, button, img, span') || finalCell;
-                                                    activationNode.click();
-                                                    return true;
-                                                }
+                                    const trs = Array.from(document.querySelectorAll('tr'));
+                                    for (const tr of trs) {
+                                        // Skip table layout nodes holding nested data tables
+                                        if (tr.querySelector('table')) continue;
+                                        
+                                        const cells = Array.from(tr.querySelectorAll('td, th'));
+                                        const match = cells.some(c => (c.innerText || '').trim() === regNum || (c.innerText || '').includes(regNum));
+                                        
+                                        if (match) {
+                                            const tdCells = tr.querySelectorAll('td');
+                                            if (tdCells.length > 0) {
+                                                const finalCell = tdCells[tdCells.length - 1];
+                                                const node = finalCell.querySelector('a, button, img, span') || finalCell;
+                                                node.click();
+                                                return true;
                                             }
                                         }
                                     }
                                     return false;
                                 }""", str(reg_token))
                                 
-                            # HALT EXECUTION: Wait explicitly for operating system disk write sync confirmation
                             download = download_info.value
                             temp_pdf_path = os.path.join(CURRENT_DIR, f"backfill_temp_{reg_token}.pdf")
                             download.save_as(temp_pdf_path)
@@ -288,7 +285,6 @@ def backfill_historical_registry():
                         extended_record = base_row_list + [pdf_text]
                         page_records.append(extended_record)
                         
-                        # Add a deliberate 1.5-second hard session cool-down.
                         page.wait_for_timeout(1500)
                     
                     if page_records:
@@ -308,13 +304,10 @@ def backfill_historical_registry():
                         print(f"\n[SYSTEM] Reached maximum processing threshold allotment ({MAX_FRESH_PAGES_PER_RUN} fresh pages).")
                         break
                 
-                # Cache current first-row tracking identity before moving pagination structures forward
                 if this_page_first_token:
                     last_first_token = this_page_first_token
                 
-                # --- NATIVE ORACLE APEX INTERACTIVE REPORT PAGINATION HANDLING ---
                 has_next_page = winning_frame.evaluate("""() => {
-                    // Modern direct target priority match selector
                     const apexNextBtn = document.querySelector('button[data-pagination="next"], .a-IRR-button--pagination[title*="Next"]');
                     if (apexNextBtn) {
                         apexNextBtn.click();
@@ -340,7 +333,7 @@ def backfill_historical_registry():
                 
                 if has_next_page:
                     page_number += 1
-                    page.wait_for_timeout(1000) # Fast base delay to allow AJAX transmission initialization
+                    page.wait_for_timeout(1000)
                 else:
                     print("No subsequent data blocks found. Archive backfill fully complete!")
                     break
