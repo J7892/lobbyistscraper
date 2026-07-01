@@ -1,7 +1,7 @@
 """
 alberta_lobbyist_scraper.py
 Daily incremental change analyzer with automated Gmail HTML digest mailing.
-Includes advanced structural row-filtering to eliminate layout noise.
+Includes Token-Based structural row-matching to eliminate layout noise.
 """
 import os
 import smtplib
@@ -133,21 +133,17 @@ def execute_daily_scrape():
                     reg_num_idx = 0
                     
                 for idx in range(data_start_idx, len(matrix)):
-                    # Sanitize structural spacing elements from raw browser cell values instantly
                     raw_row_data = matrix[idx]
                     row_data = [str(cell).replace("\n", " ").replace("\t", " ").strip() for cell in raw_row_data]
                     
                     if not any(row_data) or len(row_data) <= reg_num_idx:
                         continue
                         
-                    # DATA VALIDATION GUARD: Drop layout summary lines and framework meta-headers completely
                     combined_row_text = "".join(row_data).upper()
                     if "FILING DATE" in combined_row_text or "1 - 15 OF" in combined_row_text or "VIEW" == row_data[0]:
                         continue
                         
                     live_token = str(row_data[reg_num_idx])
-                    
-                    # Ensure token matches a clean registry identifier format, skipping empty artifacts
                     if not live_token or "REGISTRATION" in live_token.upper():
                         continue
                     
@@ -157,26 +153,25 @@ def execute_daily_scrape():
                         pdf_text = "No tracking details extracted from profile disclosure file"
                         try:
                             with context.expect_event("download", timeout=6000) as download_info:
-                                winning_frame.evaluate("""(targetIndex) => {
+                                # TOKEN-BASED MATCHING: Locates the cell matching the exact registration identifier text string
+                                winning_frame.evaluate("""(regNum) => {
                                     const tables = Array.from(document.querySelectorAll('table'));
-                                    let bestTable = null;
                                     for (const table of tables) {
-                                        if ((table.innerText || '').toLowerCase().includes('registration')) {
-                                            bestTable = table; break;
-                                        }
-                                    }
-                                    if (bestTable) {
-                                        const trs = Array.from(bestTable.querySelectorAll('tr'));
-                                        if (targetIndex < trs.length) {
-                                            const cells = trs[targetIndex].querySelectorAll('td');
-                                            if (cells.length > 0) {
-                                                const finalCell = cells[cells.length - 1];
-                                                const node = finalCell.querySelector('a, img') || finalCell;
-                                                node.click();
+                                        const trs = Array.from(table.querySelectorAll('tr'));
+                                        for (const tr of trs) {
+                                            if (tr.innerText.includes(regNum)) {
+                                                const cells = tr.querySelectorAll('td');
+                                                if (cells.length > 0) {
+                                                    const finalCell = cells[cells.length - 1];
+                                                    const node = finalCell.querySelector('a, img') || finalCell;
+                                                    node.click();
+                                                    return true;
+                                                }
                                             }
                                         }
                                     }
-                                }""", idx)
+                                    return false;
+                                }""", str(live_token))
                             
                             download = download_info.value
                             temp_path = os.path.join(CURRENT_DIR, f"daily_temp_{live_token}.pdf")
